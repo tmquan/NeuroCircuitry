@@ -206,7 +206,7 @@ callbacks:
   tensorboard_volume:
     enabled: true
     log_every_n_epochs: 1  # Log volume slices every N epochs
-    num_slices: 8          # Number of slices per axis
+    num_slices: 4          # Number of slices to visualize (horizontal row)
     # For tensor [Z, Y, X] = [D, H, W]:
     # - "axial": slice through Z, view Y-X plane (typical EM microscope view)
     # - "coronal": slice through Y, view Z-X plane

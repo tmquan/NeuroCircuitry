@@ -504,28 +504,19 @@ class TensorBoardVolumeCallback(Callback):
         Returns:
             Grid image [3, grid_H, grid_W].
         """
-        batch_size = min(images.shape[0], self.max_samples)
+        # Only use first sample for cleaner visualization
+        img_slices = self._extract_slices(images[0], axis)
         
-        rows = []
-        for b in range(batch_size):
-            img_slices = self._extract_slices(images[b], axis)
-            
-            for img_slice in img_slices:
-                # Convert grayscale to RGB
-                img_norm = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
-                img_rgb = rearrange(img_norm, "h w -> 1 h w").repeat(3, 1, 1)
-                rows.append(img_rgb)
+        slice_imgs = []
+        for img_slice in img_slices:
+            # Convert grayscale to RGB
+            img_norm = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min() + 1e-8)
+            img_rgb = rearrange(img_norm, "h w -> 1 h w").repeat(3, 1, 1)
+            slice_imgs.append(img_rgb)
         
-        if rows:
-            # Arrange in a grid: stack horizontally per batch, then vertically
-            cols_per_row = self.num_slices
-            grid_rows = []
-            for i in range(0, len(rows), cols_per_row):
-                row_imgs = rows[i:i + cols_per_row]
-                if row_imgs:
-                    grid_rows.append(torch.cat(row_imgs, dim=2))  # Concat along W
-            if grid_rows:
-                return torch.cat(grid_rows, dim=1)  # Concat along H
+        if slice_imgs:
+            # Concatenate horizontally (single row)
+            return torch.cat(slice_imgs, dim=2)
         
         return torch.zeros(3, 64, 64)
     
@@ -550,26 +541,17 @@ class TensorBoardVolumeCallback(Callback):
         if labels.dim() == 5:
             labels = rearrange(labels, "b 1 z y x -> b z y x")
         
-        batch_size = min(labels.shape[0], self.max_samples)
+        # Only use first sample for cleaner visualization
+        lbl_slices = self._extract_slices(labels[0], axis)
         
-        rows = []
-        for b in range(batch_size):
-            lbl_slices = self._extract_slices(labels[b], axis)
-            
-            for lbl_slice in lbl_slices:
-                lbl_rgb = self._apply_colormap(lbl_slice, is_instance=is_instance)
-                rows.append(lbl_rgb)
+        slice_imgs = []
+        for lbl_slice in lbl_slices:
+            lbl_rgb = self._apply_colormap(lbl_slice, is_instance=is_instance)
+            slice_imgs.append(lbl_rgb)
         
-        if rows:
-            # Arrange in a grid
-            cols_per_row = self.num_slices
-            grid_rows = []
-            for i in range(0, len(rows), cols_per_row):
-                row_imgs = rows[i:i + cols_per_row]
-                if row_imgs:
-                    grid_rows.append(torch.cat(row_imgs, dim=2))  # Concat along W
-            if grid_rows:
-                return torch.cat(grid_rows, dim=1)  # Concat along H
+        if slice_imgs:
+            # Concatenate horizontally (single row)
+            return torch.cat(slice_imgs, dim=2)
         
         return torch.zeros(3, 64, 64)
     
@@ -592,44 +574,34 @@ class TensorBoardVolumeCallback(Callback):
         """
         from neurocircuitry.utils.labels import cluster_embeddings_meanshift
         
-        batch_size = min(embeddings.shape[0], self.max_samples)
-        
-        # Get foreground mask from semantic predictions
+        # Get foreground mask from semantic predictions (first sample only)
         fg_mask = predictions.argmax(dim=1)  # [B, Z, Y, X]
         
-        rows = []
-        for b in range(batch_size):
-            emb = embeddings[b]  # [E, Z, Y, X]
-            fg = fg_mask[b]  # [Z, Y, X]
-            
-            # Cluster embeddings to get predicted instances
-            try:
-                pred_instances = cluster_embeddings_meanshift(
-                    emb,
-                    foreground_mask=fg,
-                    bandwidth=self.clustering_bandwidth,
-                    min_cluster_size=50,
-                )
-            except Exception:
-                # Fallback: use foreground mask as single instance
-                pred_instances = fg.long()
-            
-            pred_slices = self._extract_slices(pred_instances, axis)
-            
-            for pred_slice in pred_slices:
-                pred_rgb = self._apply_colormap(pred_slice, is_instance=True)
-                rows.append(pred_rgb)
+        emb = embeddings[0]  # [E, Z, Y, X]
+        fg = fg_mask[0]  # [Z, Y, X]
         
-        if rows:
-            # Arrange in a grid
-            cols_per_row = self.num_slices
-            grid_rows = []
-            for i in range(0, len(rows), cols_per_row):
-                row_imgs = rows[i:i + cols_per_row]
-                if row_imgs:
-                    grid_rows.append(torch.cat(row_imgs, dim=2))  # Concat along W
-            if grid_rows:
-                return torch.cat(grid_rows, dim=1)  # Concat along H
+        # Cluster embeddings to get predicted instances
+        try:
+            pred_instances = cluster_embeddings_meanshift(
+                emb,
+                foreground_mask=fg,
+                bandwidth=self.clustering_bandwidth,
+                min_cluster_size=50,
+            )
+        except Exception:
+            # Fallback: use foreground mask as single instance
+            pred_instances = fg.long()
+        
+        pred_slices = self._extract_slices(pred_instances, axis)
+        
+        slice_imgs = []
+        for pred_slice in pred_slices:
+            pred_rgb = self._apply_colormap(pred_slice, is_instance=True)
+            slice_imgs.append(pred_rgb)
+        
+        if slice_imgs:
+            # Concatenate horizontally (single row)
+            return torch.cat(slice_imgs, dim=2)
         
         return torch.zeros(3, 64, 64)
     
