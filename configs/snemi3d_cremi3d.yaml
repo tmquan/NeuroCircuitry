@@ -1,20 +1,23 @@
 # =============================================================================
-# SNEMI3D Vista3D Configuration
+# SNEMI3D + CREMI3D Combined Vista3D Configuration
 # =============================================================================
-# Training Vista3D model for neuron segmentation in electron microscopy images.
+# Training Vista3D model on combined SNEMI3D and CREMI3D datasets for
+# multi-class neuron segmentation in electron microscopy images.
 #
-# Supports:
-#   - Automatic segmentation mode (training.mode: auto)
-#   - Interactive segmentation mode (training.mode: interactive)
-#   - Mixed training with both modes (training.mode: mixed)
+# Dataset formats (instance segmentation challenge format):
+# - 'image': input EM volume [Z, Y, X]
+# - 'label': indexed instance segmentation (unique IDs per object)
+# - 'class_ids': semantic class for each pixel (background=0, neuron=1, ...)
+#
+# SNEMI3D: Single class (neuron) - [100, 1024, 1024] @ 6nm/px XY, 30nm/slice Z
+# CREMI3D: Multiple classes (neuron, cleft, mito) - [125, 1250, 1250] @ 4nm/px
 #
 # Usage:
-#   python scripts/train_vista3d.py --config configs/snemi3d_vista3d.yaml
-#   python scripts/train_vista3d.py --config configs/snemi3d_vista3d.yaml training.mode=interactive
+#   python scripts/train_vista3d.py --config configs/snemi3d_cremi3d.yaml
 # =============================================================================
 
 # Experiment settings
-experiment_name: snemi3d_vista3d
+experiment_name: snemi3d_cremi3d
 project_name: neurocircuitry-vista3d
 seed: 42
 logger: tensorboard
@@ -23,29 +26,40 @@ log_dir: logs
 # =============================================================================
 # Data Configuration
 # =============================================================================
-# SNEMI3D data dimensions: [Z, Y, X] = [100, 1024, 1024]
-# - Z: 100 slices (depth through tissue, ~30nm/slice)
-# - Y: 1024 pixels (height, 6nm/pixel)
-# - X: 1024 pixels (width, 6nm/pixel)
-# =============================================================================
 data:
-  dataset: snemi3d
-  data_root: data/SNEMI3D
+  # Multi-dataset mode: combines SNEMI3D and CREMI3D
+  dataset: multi
   
-  # 3D patch size for training [Z, Y, X] - random crops from full volume
-  # Using [64, 256, 256] to maintain square XY slices for visualization
-  patch_size: [64, 256, 256]
+  # Dataset-specific configurations
+  datasets:
+    snemi3d:
+      enabled: true
+      data_root: data/SNEMI3D
+      weight: 1.0  # Sampling weight relative to other datasets
+      
+    cremi3d:
+      enabled: true
+      data_root: data/CREMI3D
+      weight: 1.0
+      # CREMI volumes to use (only A available currently)
+      volumes: ["A"]
   
-  # Batch size (reduce if OOM, increase for faster training)
-  batch_size: 8
+  # 3D patch size for training [Z, Y, X]
+  # Using [32, 128, 128] for compatibility with both datasets
+  # SNEMI3D: 100 Z slices, CREMI3D: 125 Z slices
+  patch_size: [32, 128, 128]
+  
+  # Batch size (reduce if OOM)
+  batch_size: 4
   
   # Data loading
   num_workers: 4
   cache_rate: 1.0  # Cache full volumes in memory
   
-  # Number of random crops per epoch
-  num_train_samples: 800  # Random crops for training per epoch
-  num_val_samples: 200     # Random crops for validation per epoch
+  # Virtual expansion factor for sampling many patches from few volumes
+  # With 1 volume per dataset, this creates (2 volumes * factor) samples per epoch
+  train_expansion_factor: 100  # 200 total train samples (with random crop augmentation)
+  val_expansion_factor: 10     # 20 total val samples
   
   # Train/validation split ratio
   train_val_split: 0.2
@@ -53,23 +67,26 @@ data:
   # Data augmentation
   augmentation: true
   
-  # Semantic class configuration
-  # Defines mapping from instance IDs to semantic classes
+  # Unified semantic class configuration for both datasets
   semantic_classes:
-    # Class names in order (index = class_id)
-    # class 0 = background, class 1 = neuron, etc.
-    names: ["background", "neuron"]
+    # Class names (index = class_id)
+    # 0=background, 1=neuron, 2=cleft, 3=mito
+    names: ["background", "neuron", "cleft", "mito"]
     
-    # Instance ID mapping: class_name -> list of instance IDs
-    # For SNEMI3D: all foreground (label > 0) is neuron, so no explicit mapping needed
-    # For multi-class datasets like CREMI, specify which instance IDs belong to each class:
-    #   instance_ids:
-    #     neuron: [1, 2, 3, 10, 23, 45, ...]  # Neuron instance IDs in full volume
-    #     mito: [4, 5, 8, 9, 12, ...]         # Mitochondria instance IDs
-    #     cleft: [100, 101, 102, ...]         # Synaptic cleft instance IDs
-    instance_ids: null  # null = default binary (all foreground = class 1)
+    # Per-dataset instance ID to class mapping
+    per_dataset:
+      snemi3d:
+        # SNEMI3D: all foreground is neuron (class 1)
+        instance_ids: null  # null = use default_class for all foreground
+        default_class: 1
+        
+      cremi3d:
+        # CREMI3D: has separate annotations for each structure
+        # Instance IDs are assigned based on annotation type during loading
+        instance_ids: null  # Handled by CREMI3D dataset loader
+        default_class: 1    # Default to neuron if unmapped
     
-    # Default class for unmapped foreground instances
+    # Global default for unmapped foreground
     default_class: 1
 
 # =============================================================================
@@ -82,8 +99,9 @@ model:
   
   # Input/Output
   in_channels: 1
-  # num_classes should match data.semantic_classes.num_classes
-  num_classes: 2  # 0=background, 1=neuron (see data.semantic_classes)
+  # num_classes should match data.semantic_classes
+  # With CREMI3D enabled: 4 classes (background, neuron, cleft, mito)
+  num_classes: 4  # 0=background, 1=neuron, 2=cleft, 3=mito
   
   # Semantic and Instance heads (following ariel architecture)
   sem_head: 16  # Semantic embedding dimension
@@ -113,7 +131,7 @@ training:
   
   # Hardware
   # Use CUDA_VISIBLE_DEVICES to select a free GPU:
-  #   CUDA_VISIBLE_DEVICES=5 python scripts/train_vista3d.py --config configs/snemi3d_vista3d.yaml
+  #   CUDA_VISIBLE_DEVICES=5 python scripts/train_vista3d.py --config configs/snemi3d_cremi3d.yaml
   accelerator: gpu
   devices: 1  # Use 1 GPU (selected by CUDA_VISIBLE_DEVICES)
   strategy: auto  # Will use SingleDeviceStrategy for 1 GPU
@@ -164,7 +182,7 @@ loss:
   boundary_weight: 0.1  # Optional boundary-aware loss
   
   # Instance segmentation loss weight (discriminative loss)
-  disc_weight: 1.0
+  ins_weight: 1.0
   
   # Discriminative loss configuration (for instance embeddings)
   # Based on "Semantic Instance Segmentation with a Discriminative Loss Function"
@@ -176,8 +194,9 @@ loss:
     beta: 1.0         # Weight for distance term
     gamma: 0.001      # Weight for regularization term
   
-  # Class weights for imbalanced data (background, foreground)
-  class_weights: [0.3, 0.7]
+  # Class weights for imbalanced data (background, neuron, cleft, mito)
+  # Higher weights for rarer classes
+  class_weights: [0.1, 0.4, 0.3, 0.2]
   
   # Ignore index for unlabeled regions
   ignore_index: -100
@@ -205,7 +224,7 @@ callbacks:
   
   tensorboard_volume:
     enabled: true
-    log_every_n_epochs: 1  # Log volume slices every N epochs
+    log_every_n_epochs: 5  # Log volume slices every N epochs
     num_slices: 4          # Number of slices to visualize (horizontal row)
     # For tensor [Z, Y, X] = [D, H, W]:
     # - "axial": slice through Z, view Y-X plane (typical EM microscope view)
@@ -213,7 +232,7 @@ callbacks:
     # - "sagittal": slice through X, view Z-Y plane
     # With patch_size [32, 128, 128], axial gives square [128, 128] slices
     slice_axes: ["axial"]  # Only YX plane (typical EM view)
-    max_samples: 2         # Max samples to visualize per batch
+    max_samples: 4         # Max samples to visualize per batch
     log_train: true        # Log training samples
     log_val: true          # Log validation samples
     log_embeddings: true   # Log instance embeddings as PCA projection to RGB
@@ -225,7 +244,7 @@ callbacks:
 # =============================================================================
 inference:
   # Sliding window settings [Z, Y, X]
-  patch_size: [64, 256, 256]
-  stride: [32, 128, 128]  # 50% overlap
+  patch_size: [32, 128, 128]
+  stride: [16, 64, 64]  # 50% overlap
   aggregation: gaussian  # 'gaussian', 'average', 'max'
   batch_size: 4

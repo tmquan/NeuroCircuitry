@@ -1,0 +1,225 @@
+# =============================================================================
+# Multi-Dataset Vista3D Configuration
+# =============================================================================
+# Training Vista3D model on combined SNEMI3D and CREMI3D datasets.
+#
+# Dataset formats (instance segmentation challenge format):
+# - 'image': input EM volume [Z, Y, X]
+# - 'label': indexed instance segmentation (unique IDs per object)
+# - 'class_ids': semantic class for each pixel (background=0, neuron=1, ...)
+#
+# SNEMI3D: Single class (neuron)
+#   - All foreground (label > 0) maps to class 1 (neuron)
+#
+# CREMI3D: Multiple classes
+#   - Neurons, synaptic clefts, mitochondria, etc.
+#   - Instance IDs mapped to semantic classes via instance_ids config
+#
+# Usage:
+#   python scripts/train_vista3d.py --config configs/multi_dataset.yaml
+# =============================================================================
+
+# Experiment settings
+experiment_name: multi_dataset_vista3d
+project_name: neurocircuitry-vista3d
+seed: 42
+logger: tensorboard
+log_dir: logs
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  # Multi-dataset mode
+  dataset: multi  # 'snemi3d', 'cremi3d', or 'multi'
+  
+  # Dataset paths
+  datasets:
+    snemi3d:
+      enabled: true
+      data_root: data/SNEMI3D
+      weight: 1.0  # Sampling weight relative to other datasets
+      
+    cremi3d:
+      enabled: true
+      data_root: data/CREMI3D
+      weight: 1.0
+      # Volumes to use (CREMI has A, B, C samples)
+      volumes: ["A", "B", "C"]
+  
+  # 3D patch size for training [Z, Y, X]
+  # Common size that works for both datasets
+  patch_size: [32, 128, 128]
+  
+  # Batch size
+  batch_size: 4
+  
+  # Data loading
+  num_workers: 4
+  cache_rate: 1.0
+  
+  # Number of random crops per epoch
+  num_train_samples: 1000
+  num_val_samples: 200
+  
+  # Train/validation split ratio
+  train_val_split: 0.2
+  
+  # Data augmentation
+  augmentation: true
+  
+  # Semantic class configuration
+  # Unified class scheme for both datasets
+  semantic_classes:
+    # Class names (index = class_id)
+    # 0 = background (always)
+    names: ["background", "neuron", "cleft", "mito"]
+    
+    # Instance ID to class mapping per dataset
+    # For SNEMI3D: all foreground is neuron (default_class handles this)
+    # For CREMI3D: specify which instance IDs belong to each class
+    per_dataset:
+      snemi3d:
+        # All foreground maps to neuron (class 1)
+        instance_ids: null  # null = use default_class for all foreground
+        default_class: 1
+        
+      cremi3d:
+        # CREMI has separate annotations for each structure
+        # Instance IDs depend on how data is loaded
+        # Example mapping (adjust based on actual data):
+        instance_ids: null  # Will be populated from annotation files
+        default_class: 1  # Default to neuron if unmapped
+    
+    # Global default for unmapped foreground
+    default_class: 1
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  encoder_name: segresnet
+  feature_size: 48
+  
+  in_channels: 1
+  # num_classes should match number of semantic classes
+  num_classes: 4  # background, neuron, cleft, mito
+  
+  # Semantic and Instance heads
+  sem_head: 16
+  ins_head: 16
+  use_sem_head: true
+  use_ins_head: true
+  
+  pretrained: false
+  freeze_encoder: false
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  mode: auto
+  num_point_prompts: 5
+  
+  max_epochs: 300
+  
+  # Hardware
+  accelerator: gpu
+  devices: 1
+  strategy: auto
+  
+  precision: 16-mixed
+  
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  
+  val_check_interval: 1.0
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  
+  log_every_n_steps: 10
+  
+  benchmark: true
+  deterministic: false
+  
+  fast_dev_run: false
+
+# =============================================================================
+# Optimizer Configuration
+# =============================================================================
+optimizer:
+  type: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+  
+  scheduler:
+    type: cosine
+    T_max: 300
+    eta_min: 1.0e-7
+
+# =============================================================================
+# Loss Configuration
+# =============================================================================
+loss:
+  # Multi-class semantic segmentation
+  ce_weight: 0.5
+  dice_weight: 0.5
+  boundary_weight: 0.1
+  
+  # Instance segmentation (discriminative loss)
+  ins_weight: 1.0
+  
+  discriminative:
+    delta_var: 0.5
+    delta_dist: 1.5
+    norm: 2
+    alpha: 1.0
+    beta: 1.0
+    gamma: 0.001
+  
+  # Class weights (background, neuron, cleft, mito)
+  # Higher weights for rare classes
+  class_weights: [0.1, 0.4, 0.3, 0.2]
+  
+  ignore_index: -100
+
+# =============================================================================
+# Callbacks Configuration
+# =============================================================================
+callbacks:
+  checkpoint:
+    enabled: true
+    dirpath: null
+    filename: "multi-{epoch:02d}-{val/dice:.4f}"
+    save_top_k: 3
+    monitor: val/dice
+    mode: max
+    save_last: true
+  
+  early_stopping:
+    enabled: true
+    monitor: val/dice
+    patience: 50
+    mode: max
+  
+  tensorboard_volume:
+    enabled: true
+    log_every_n_epochs: 1
+    num_slices: 4
+    slice_axes: ["axial"]
+    max_samples: 2
+    log_train: true
+    log_val: true
+    log_embeddings: true
+    log_instances: true
+    clustering_bandwidth: 0.5
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+inference:
+  patch_size: [32, 128, 128]
+  stride: [16, 64, 64]
+  aggregation: gaussian
+  batch_size: 4

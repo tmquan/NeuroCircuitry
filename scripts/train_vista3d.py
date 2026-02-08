@@ -541,10 +541,23 @@ def load_config(config_path: Optional[str] = None) -> DictConfig:
     return cfg
 
 
-def get_datamodule(cfg: DictConfig) -> Vista3DDataModule:
-    """Create Vista3D DataModule."""
-    data_cfg = cfg.data
+def get_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
+    """Create DataModule based on config.
     
+    Supports:
+    - 'snemi3d': Single SNEMI3D dataset
+    - 'cremi3d': Single CREMI3D dataset  
+    - 'multi': Combined multi-dataset training
+    """
+    data_cfg = cfg.data
+    dataset_type = data_cfg.get("dataset", "snemi3d")
+    
+    # Multi-dataset mode
+    if dataset_type == "multi":
+        from neurocircuitry.datamodules.multi_dataset import get_multi_datamodule
+        return get_multi_datamodule(cfg)
+    
+    # Single dataset mode (snemi3d, cremi3d)
     patch_size = data_cfg.get("patch_size", [128, 128, 128])
     if isinstance(patch_size, list):
         patch_size = tuple(patch_size)
@@ -760,15 +773,15 @@ def main():
     
     # Print loss configuration
     loss_cfg = cfg.get("loss", {})
-    disc_cfg = loss_cfg.get("discriminative", {})
+    ins_cfg = loss_cfg.get("discriminative", {})
     print(f"\nLoss Configuration:")
     print(f"  CE weight: {loss_cfg.get('ce_weight', 0.5)}")
     print(f"  Dice weight: {loss_cfg.get('dice_weight', 0.5)}")
-    print(f"  Discriminative weight: {loss_cfg.get('disc_weight', 1.0)}")
-    if disc_cfg:
-        print(f"  Discriminative loss:")
-        print(f"    delta_var: {disc_cfg.get('delta_var', 0.5)}")
-        print(f"    delta_dist: {disc_cfg.get('delta_dist', 1.5)}")
+    print(f"  Instance weight: {loss_cfg.get('ins_weight', 1.0)}")
+    if ins_cfg:
+        print(f"  Instance loss:")
+        print(f"    delta_var: {ins_cfg.get('delta_var', 0.5)}")
+        print(f"    delta_dist: {ins_cfg.get('delta_dist', 1.5)}")
     
     # Setup Callbacks
     callbacks = setup_callbacks(cfg)

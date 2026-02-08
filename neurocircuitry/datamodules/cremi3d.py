@@ -2,19 +2,23 @@
 CREMI3D DataModule for PyTorch Lightning.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 from monai.transforms import (
     Compose,
+    CastToTyped,
     EnsureChannelFirstd,
     RandFlipd,
     RandRotate90d,
     RandGaussianNoised,
     RandAdjustContrastd,
+    RandSpatialCropd,
+    SpatialPadd,
     ScaleIntensityd,
     ToTensord,
     Resized,
 )
+import numpy as np
 
 from neurocircuitry.datamodules.base import BaseConnectomicsDataModule
 from neurocircuitry.datasets import CREMI3DDataset
@@ -34,24 +38,24 @@ class CREMI3DDataModule(BaseConnectomicsDataModule):
         train_val_split: Validation fraction (default: 0.2).
         cache_rate: Cache fraction (default: 0.5).
         pin_memory: Pin memory for GPU transfer (default: True).
-        image_size: Optional resize dimensions (H, W).
-        samples: List of samples to use ('A', 'B', 'C').
-        include_synapses: Include synaptic cleft labels (default: True).
-        slice_mode: Return 2D slices if True (default: True).
+        image_size: Optional resize dimensions (D, H, W).
+        patch_size: Random crop size (D, H, W) for training.
+        volumes: List of volumes to use ['A', 'B', 'C'] (default: ['A', 'B']).
+        include_clefts: Include synaptic cleft labels (default: True).
+        include_mito: Include mitochondria labels (default: False).
     
     Example:
         >>> dm = CREMI3DDataModule(
         ...     data_root="/path/to/cremi",
         ...     batch_size=8,
-        ...     samples=["A", "B"],
-        ...     include_synapses=True
+        ...     patch_size=(32, 128, 128),
+        ...     volumes=["A", "B"],
         ... )
         >>> dm.setup("fit")
         >>> 
         >>> for batch in dm.train_dataloader():
-        ...     images = batch["image"]  # [B, 1, H, W]
-        ...     labels = batch["label"]  # [B, 1, H, W]
-        ...     clefts = batch.get("clefts")  # [B, 1, H, W] if available
+        ...     images = batch["image"]  # [B, 1, D, H, W]
+        ...     labels = batch["label"]  # [B, 1, D, H, W]
     """
     
     dataset_class = CREMI3DDataset
@@ -64,15 +68,17 @@ class CREMI3DDataModule(BaseConnectomicsDataModule):
         train_val_split: float = 0.2,
         cache_rate: float = 0.5,
         pin_memory: bool = True,
-        image_size: Optional[tuple] = None,
-        samples: Optional[List[str]] = None,
-        include_synapses: bool = True,
-        slice_mode: bool = True,
+        image_size: Optional[Tuple[int, ...]] = None,
+        patch_size: Optional[Union[Tuple[int, ...], List[int]]] = None,
+        volumes: Optional[List[str]] = None,
+        include_clefts: bool = True,
+        include_mito: bool = False,
         persistent_workers: bool = True,
     ):
-        self.samples = samples
-        self.include_synapses = include_synapses
-        self.slice_mode = slice_mode
+        self.volumes = volumes if volumes is not None else ["A", "B"]
+        self.include_clefts = include_clefts
+        self.include_mito = include_mito
+        self.patch_size = tuple(patch_size) if patch_size is not None else None
         super().__init__(
             data_root=data_root,
             batch_size=batch_size,
@@ -85,77 +91,83 @@ class CREMI3DDataModule(BaseConnectomicsDataModule):
         )
     
     def _get_dataset_kwargs(self) -> dict:
-        kwargs = {
-            "slice_mode": self.slice_mode,
-            "include_synapses": self.include_synapses,
+        return {
+            "volumes": self.volumes,
+            "include_clefts": self.include_clefts,
+            "include_mito": self.include_mito,
         }
-        if self.samples is not None:
-            kwargs["samples"] = self.samples
-        return kwargs
     
     def get_train_transforms(self) -> Compose:
         """
         Get training transforms for CREMI grayscale EM images.
         
-        Includes transforms for both neuron labels and optional synapse clefts.
-        
         Returns:
             MONAI Compose transform pipeline.
         """
-        # Determine keys based on whether synapses are included
-        label_keys = ["image", "label"]
-        if self.include_synapses:
-            label_keys.append("clefts")
+        keys = ["image", "label"]
         
         transforms = [
-            EnsureChannelFirstd(keys=label_keys, channel_dim="no_channel"),
+            # Ensure proper dtypes (CREMI may load as uint16)
+            CastToTyped(keys=["image"], dtype=np.float32),
+            CastToTyped(keys=["label"], dtype=np.int64),
+            EnsureChannelFirstd(keys=keys, channel_dim="no_channel"),
             ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
         ]
         
-        if self.image_size is not None:
-            # Use nearest interpolation for all label types
-            modes = ["bilinear"] + ["nearest"] * (len(label_keys) - 1)
+        # Add random cropping if patch_size specified
+        if self.patch_size is not None:
+            transforms.extend([
+                SpatialPadd(keys=keys, spatial_size=self.patch_size),
+                RandSpatialCropd(keys=keys, roi_size=self.patch_size, random_size=False),
+            ])
+        elif self.image_size is not None:
             transforms.append(
                 Resized(
-                    keys=label_keys,
+                    keys=keys,
                     spatial_size=self.image_size,
-                    mode=modes,
+                    mode=["bilinear", "nearest"],
                 )
             )
         
         # Augmentations (apply same spatial transforms to all)
         transforms.extend([
-            RandFlipd(keys=label_keys, prob=0.5, spatial_axis=0),
-            RandFlipd(keys=label_keys, prob=0.5, spatial_axis=1),
-            RandRotate90d(keys=label_keys, prob=0.5, spatial_axes=(0, 1)),
+            RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
+            RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
+            RandRotate90d(keys=keys, prob=0.5, spatial_axes=(1, 2)),  # Rotate on YX plane only
             RandGaussianNoised(keys=["image"], prob=0.3, mean=0.0, std=0.1),
             RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.7, 1.3)),
-            ToTensord(keys=label_keys),
+            ToTensord(keys=keys),
         ])
         
         return Compose(transforms)
     
     def get_val_transforms(self) -> Compose:
-        """Get validation transforms for CREMI dataset."""
-        label_keys = ["image", "label"]
-        if self.include_synapses:
-            label_keys.append("clefts")
+        """Get validation transforms with consistent cropping."""
+        keys = ["image", "label"]
         
         transforms = [
-            EnsureChannelFirstd(keys=label_keys, channel_dim="no_channel"),
+            # Ensure proper dtypes (CREMI may load as uint16)
+            CastToTyped(keys=["image"], dtype=np.float32),
+            CastToTyped(keys=["label"], dtype=np.int64),
+            EnsureChannelFirstd(keys=keys, channel_dim="no_channel"),
             ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
         ]
         
-        if self.image_size is not None:
-            modes = ["bilinear"] + ["nearest"] * (len(label_keys) - 1)
+        # Use same cropping for validation to ensure consistent sizes
+        if self.patch_size is not None:
+            transforms.extend([
+                SpatialPadd(keys=keys, spatial_size=self.patch_size),
+                RandSpatialCropd(keys=keys, roi_size=self.patch_size, random_size=False),
+            ])
+        elif self.image_size is not None:
             transforms.append(
                 Resized(
-                    keys=label_keys,
+                    keys=keys,
                     spatial_size=self.image_size,
-                    mode=modes,
+                    mode=["bilinear", "nearest"],
                 )
             )
         
-        transforms.append(ToTensord(keys=label_keys))
+        transforms.append(ToTensord(keys=keys))
         
         return Compose(transforms)

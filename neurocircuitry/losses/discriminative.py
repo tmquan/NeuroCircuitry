@@ -37,7 +37,7 @@ class DiscriminativeLoss(nn.Module):
         >>> embedding = torch.randn(4, 16, 256, 256)  # [B, E, H, W]
         >>> labels = torch.randint(0, 10, (4, 256, 256))  # [B, H, W]
         >>> 
-        >>> total_loss, L_var, L_dist, L_reg = loss_fn(embedding, labels)
+        >>> total_loss, L_var, L_dst, L_reg = loss_fn(embedding, labels)
     """
     
     def __init__(
@@ -96,9 +96,6 @@ class DiscriminativeLoss(nn.Module):
         unique_instances: torch.Tensor,
     ) -> torch.Tensor:
         """Compute cluster centers for each instance."""
-        # Ensure float32
-        emb = emb.float()
-        
         centers = []
         
         for inst_id in unique_instances:
@@ -111,7 +108,7 @@ class DiscriminativeLoss(nn.Module):
             centers.append(center)
         
         if len(centers) == 0:
-            return torch.zeros((0, emb.shape[0]), device=emb.device, dtype=torch.float32)
+            return torch.zeros((0, emb.shape[0]), device=emb.device)
         
         return torch.stack(centers)
     
@@ -159,20 +156,20 @@ class DiscriminativeLoss(nn.Module):
         # Ensure float32
         cluster_centers = cluster_centers.float()
         
-        loss_dist = torch.tensor(0.0, device=cluster_centers.device, dtype=torch.float32)
+        loss_dst = torch.tensor(0.0, device=cluster_centers.device, dtype=torch.float32)
         n_pairs = 0
         
         for i in range(num_instances):
             for j in range(i + 1, num_instances):
-                dist = torch.norm(cluster_centers[i] - cluster_centers[j], p=self.norm)
-                hinged = F.relu(2 * self.delta_dist - dist) ** 2
-                loss_dist = loss_dist + hinged
+                dst = torch.norm(cluster_centers[i] - cluster_centers[j], p=self.norm)
+                hinged = F.relu(2 * self.delta_dist - dst) ** 2
+                loss_dst = loss_dst + hinged
                 n_pairs += 1
         
         if n_pairs > 0:
-            loss_dist = loss_dist / n_pairs
+            loss_dst = loss_dst / n_pairs
         
-        return loss_dist
+        return loss_dst
     
     def _regularization_loss(self, cluster_centers: torch.Tensor) -> torch.Tensor:
         """Compute regularization loss: keep centers near origin."""
@@ -200,7 +197,7 @@ class DiscriminativeLoss(nn.Module):
                           Value 0 = background, >0 = instance IDs.
         
         Returns:
-            Tuple of (total_loss, L_var, L_dist, L_reg).
+            Tuple of (total_loss, L_var, L_dst, L_reg).
         """
         batch_size = embedding.shape[0]
         
@@ -208,7 +205,7 @@ class DiscriminativeLoss(nn.Module):
         
         # Ensure float32 for loss accumulation
         loss_var_total = torch.tensor(0.0, device=embedding.device, dtype=torch.float32)
-        loss_dist_total = torch.tensor(0.0, device=embedding.device, dtype=torch.float32)
+        loss_dst_total = torch.tensor(0.0, device=embedding.device, dtype=torch.float32)
         loss_reg_total = torch.tensor(0.0, device=embedding.device, dtype=torch.float32)
         
         valid_batches = 0
@@ -228,25 +225,25 @@ class DiscriminativeLoss(nn.Module):
             cluster_centers = self._compute_cluster_means(emb, inst, unique_instances)
             
             loss_var = self._variance_loss(emb, inst, unique_instances, cluster_centers)
-            loss_dist = self._distance_loss(cluster_centers)
+            loss_dst = self._distance_loss(cluster_centers)
             loss_reg = self._regularization_loss(cluster_centers)
             
             loss_var_total = loss_var_total + loss_var
-            loss_dist_total = loss_dist_total + loss_dist
+            loss_dst_total = loss_dst_total + loss_dst
             loss_reg_total = loss_reg_total + loss_reg
         
         if valid_batches > 0:
             loss_var_total = loss_var_total / valid_batches
-            loss_dist_total = loss_dist_total / valid_batches
+            loss_dst_total = loss_dst_total / valid_batches
             loss_reg_total = loss_reg_total / valid_batches
         
         total_loss = (
             self.alpha * loss_var_total +
-            self.beta * loss_dist_total +
+            self.beta * loss_dst_total +
             self.gamma * loss_reg_total
         )
         
-        return total_loss, loss_var_total, loss_dist_total, loss_reg_total
+        return total_loss, loss_var_total, loss_dst_total, loss_reg_total
     
     def __repr__(self) -> str:
         return (
@@ -376,14 +373,14 @@ class DiscriminativeLossVectorized(DiscriminativeLoss):
         means_j = rearrange(cluster_means, "c e -> 1 c e")
         
         diff = means_i - means_j
-        pairwise_dist = torch.norm(diff, p=self.norm, dim=2)
+        pairwise_dst = torch.norm(diff, p=self.norm, dim=2)
         
         triu_indices = torch.triu_indices(
             num_instances, num_instances, offset=1, device=cluster_means.device
         )
-        upper_dists = pairwise_dist[triu_indices[0], triu_indices[1]]
+        upper_dsts = pairwise_dst[triu_indices[0], triu_indices[1]]
         
-        hinged = F.relu(2 * self.delta_dist - upper_dists) ** 2
-        dist_loss = reduce(hinged, "n -> ", "mean")
+        hinged = F.relu(2 * self.delta_dist - upper_dsts) ** 2
+        dst_loss = reduce(hinged, "n -> ", "mean")
         
-        return dist_loss
+        return dst_loss

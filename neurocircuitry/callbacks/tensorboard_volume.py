@@ -295,37 +295,49 @@ class TensorBoardVolumeCallback(Callback):
         elif axis in ["sagittal", "yz"]:
             axis = "sagittal"
         
-        # Get axis dimension and slice
+        # Get axis dimension
         if axis == "axial":
-            # Slice through Z, view Y-X plane (typical EM microscope view)
             dim_size = Z
         elif axis == "coronal":
-            # Slice through Y, view Z-X plane
             dim_size = Y
         elif axis == "sagittal":
-            # Slice through X, view Z-Y plane
             dim_size = X
         else:
             raise ValueError(f"Unknown axis: {axis}. Use 'axial', 'coronal', or 'sagittal'")
         
-        # Compute evenly spaced slice indices
-        indices = torch.linspace(
-            dim_size * 0.1,
-            dim_size * 0.9,
-            self.num_slices,
-            device=volume.device,
-        ).long()
-        
-        slices = []
-        for idx in indices:
+        # Find valid (non-empty) slice indices
+        valid_indices = []
+        for idx in range(dim_size):
             if axis == "axial":
-                # Slice through Z, view Y-X plane (typical EM microscope view)
+                slice_data = volume[idx, :, :]
+            elif axis == "coronal":
+                slice_data = volume[:, idx, :]
+            elif axis == "sagittal":
+                slice_data = volume[:, :, idx]
+            
+            # Check if slice has content (not all zeros/padding)
+            if slice_data.abs().sum() > 0:
+                valid_indices.append(idx)
+        
+        # If no valid slices, fall back to middle slices
+        if not valid_indices:
+            valid_indices = list(range(dim_size // 4, 3 * dim_size // 4))
+        
+        # Sample evenly spaced indices from valid range
+        if len(valid_indices) >= self.num_slices:
+            step = len(valid_indices) // self.num_slices
+            selected_indices = [valid_indices[i * step] for i in range(self.num_slices)]
+        else:
+            selected_indices = valid_indices[:self.num_slices]
+        
+        # Extract slices
+        slices = []
+        for idx in selected_indices:
+            if axis == "axial":
                 slices.append(volume[idx, :, :])  # [Y, X]
             elif axis == "coronal":
-                # Slice through Y, view Z-X plane
                 slices.append(volume[:, idx, :])  # [Z, X]
             elif axis == "sagittal":
-                # Slice through X, view Z-Y plane
                 slices.append(volume[:, :, idx])  # [Z, Y]
         
         return slices
@@ -443,49 +455,56 @@ class TensorBoardVolumeCallback(Callback):
         elif axis in ["sagittal", "yz"]:
             axis = "sagittal"
         
-        rows = []
-        for b in range(batch_size):
-            emb = embeddings[b]  # [E, Z, Y, X]
-            
-            # Extract slices along axis
-            E, Z, Y, X = emb.shape
-            
-            if axis == "axial":
-                dim_size = Z  # Slice through Z
-            elif axis == "coronal":
-                dim_size = Y  # Slice through Y
-            elif axis == "sagittal":
-                dim_size = X  # Slice through X
-            else:
-                raise ValueError(f"Unknown axis: {axis}")
-            
-            # Get slice indices
-            indices = torch.linspace(
-                dim_size * 0.1,
-                dim_size * 0.9,
-                self.num_slices,
-                device=emb.device,
-            ).long()
-            
-            for idx in indices:
-                # Extract embedding slice
-                if axis == "axial":
-                    # Slice through Z, view Y-X plane (typical EM view)
-                    emb_slice = emb[:, idx, :, :]  # [E, Y, X]
-                elif axis == "coronal":
-                    # Slice through Y, view Z-X plane
-                    emb_slice = emb[:, :, idx, :]  # [E, Z, X]
-                elif axis == "sagittal":
-                    # Slice through X, view Z-Y plane
-                    emb_slice = emb[:, :, :, idx]  # [E, Z, Y]
-                
-                # Convert embedding to RGB
-                rgb = self._embedding_to_rgb(emb_slice)
-                rows.append(rgb)
+        # Use first sample only
+        emb = embeddings[0]  # [E, Z, Y, X]
+        E, Z, Y, X = emb.shape
         
-        if rows:
-            grid = torch.cat(rows, dim=1)  # Stack vertically
-            return grid
+        if axis == "axial":
+            dim_size = Z
+        elif axis == "coronal":
+            dim_size = Y
+        elif axis == "sagittal":
+            dim_size = X
+        else:
+            raise ValueError(f"Unknown axis: {axis}")
+        
+        # Find valid slice indices (where embedding has content)
+        valid_indices = []
+        for idx in range(dim_size):
+            if axis == "axial":
+                slice_data = emb[:, idx, :, :]
+            elif axis == "coronal":
+                slice_data = emb[:, :, idx, :]
+            elif axis == "sagittal":
+                slice_data = emb[:, :, :, idx]
+            
+            if slice_data.abs().sum() > 0:
+                valid_indices.append(idx)
+        
+        if not valid_indices:
+            valid_indices = list(range(dim_size // 4, 3 * dim_size // 4))
+        
+        # Sample evenly spaced indices
+        if len(valid_indices) >= self.num_slices:
+            step = len(valid_indices) // self.num_slices
+            selected_indices = [valid_indices[i * step] for i in range(self.num_slices)]
+        else:
+            selected_indices = valid_indices[:self.num_slices]
+        
+        slice_imgs = []
+        for idx in selected_indices:
+            if axis == "axial":
+                emb_slice = emb[:, idx, :, :]  # [E, Y, X]
+            elif axis == "coronal":
+                emb_slice = emb[:, :, idx, :]  # [E, Z, X]
+            elif axis == "sagittal":
+                emb_slice = emb[:, :, :, idx]  # [E, Z, Y]
+            
+            rgb = self._embedding_to_rgb(emb_slice)
+            slice_imgs.append(rgb)
+        
+        if slice_imgs:
+            return torch.cat(slice_imgs, dim=2)  # Concatenate horizontally
         
         return torch.zeros(3, 64, 64)
     

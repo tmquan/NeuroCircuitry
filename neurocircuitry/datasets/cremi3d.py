@@ -1,104 +1,99 @@
 """
-CREMI3D Dataset for neuron and synapse segmentation.
+CREMI3D Dataset for connectomics instance segmentation.
 
-The CREMI challenge dataset from MICCAI 2016.
+CREMI (Circuit Reconstruction from Electron Microscopy Images) Challenge:
+- 3 volumes: A, B, C (training A, B have labels; C is test)
+- Resolution: 4nm x 4nm x 40nm (anisotropic)
+- Annotations: neurons, synaptic clefts, (optionally mitochondria)
+
+Data format:
+- image: raw EM volume [Z, Y, X]
+- label: instance segmentation (neuron IDs, cleft IDs merged with offsets)
+- class_ids: semantic class per pixel (background=0, neuron=1, cleft=2, mito=3)
+
+Reference:
+- https://cremi.org/
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from neurocircuitry.datasets.base import BaseConnectomicsDataset
-from neurocircuitry.preprocessors import HDF5Preprocessor, TIFFPreprocessor
+from .base import BaseConnectomicsDataset
 
 
 class CREMI3DDataset(BaseConnectomicsDataset):
     """
-    CREMI3D Dataset for neuron and synapse segmentation.
+    CREMI3D dataset for neuron and synapse segmentation.
     
-    Dataset from the CREMI challenge (MICCAI 2016) containing electron
-    microscopy images of Drosophila brain with neuron instance segmentation
-    and synaptic cleft annotations.
+    Expected directory structure:
+        data_root/
+        ├── sample_A.h5 (or sample_A/)
+        │   ├── volumes/raw (EM image)
+        │   ├── volumes/labels/neuron_ids
+        │   └── volumes/labels/clefts (optional)
+        ├── sample_B.h5
+        └── sample_C.h5 (test, no labels)
     
-    Dataset Structure:
-        - Samples: A, B, C (each 125 slices, 1250x1250)
-        - Annotations: Neuron segmentation + synaptic cleft labels
-        - Resolution: 4x4x40 nm (anisotropic)
+    Or alternative structure:
+        data_root/
+        ├── sample_A_raw.h5
+        ├── sample_A_neuron_ids.h5
+        ├── sample_A_clefts.h5
+        └── ...
     
-    Expected file structure:
-        root_dir/
-            sample_A_20160501.hdf or sample_A.h5
-            sample_B_20160501.hdf or sample_B.h5
-            sample_C_20160501.hdf or sample_C.h5
-    
-    HDF5 structure:
-        /volumes/raw          - Raw EM images
-        /volumes/labels/neuron_ids   - Neuron segmentation
-        /volumes/labels/clefts       - Synaptic cleft labels
-    
-    Args:
-        root_dir: Path to directory containing CREMI data files.
-        split: Data split ('train', 'valid', 'test').
-        transform: Optional MONAI transforms to apply.
-        cache_rate: Fraction of data to cache in memory (default: 1.0).
-        train_val_split: Fraction for validation split (default: 0.2).
-        samples: List of samples to use ('A', 'B', 'C'). Default: all.
-        include_synapses: Whether to include synaptic cleft labels (default: True).
-        slice_mode: If True, return individual 2D slices (default: True).
-    
-    Example:
-        >>> from neurocircuitry.datasets import CREMI3DDataset
-        >>> dataset = CREMI3DDataset(
-        ...     root_dir="/path/to/cremi",
-        ...     split="train",
-        ...     samples=["A", "B"],
-        ...     include_synapses=True
-        ... )
-        >>> sample = dataset[0]
-        >>> print(sample["image"].shape)  # (1250, 1250)
+    Attributes:
+        data_root: Root directory containing CREMI data.
+        volumes: List of volume names to load ["A", "B", "C"].
+        include_clefts: Whether to include synaptic cleft annotations.
+        include_mito: Whether to include mitochondria annotations.
+        id_offset: Offset to add to instance IDs for each class.
     """
     
-    # Class-level metadata
-    _paper = (
-        "Funke, J., et al. (2016). CREMI: MICCAI Challenge on Circuit "
-        "Reconstruction from Electron Microscopy Images. "
-        "https://cremi.org/"
-    )
-    _resolution = {"x": 4.0, "y": 4.0, "z": 40.0}  # nanometers
-    _labels_base = ["background", "neuron"]
-    _labels_with_synapse = ["background", "neuron", "synapse_cleft"]
+    # Class ID offsets for merging different annotation types
+    NEURON_ID_OFFSET = 0
+    CLEFT_ID_OFFSET = 100000
+    MITO_ID_OFFSET = 200000
     
-    # HDF5 dataset paths
-    _RAW_PATH = "volumes/raw"
-    _NEURON_PATH = "volumes/labels/neuron_ids"
-    _CLEFT_PATH = "volumes/labels/clefts"
+    # Semantic class IDs
+    CLASS_BACKGROUND = 0
+    CLASS_NEURON = 1
+    CLASS_CLEFT = 2
+    CLASS_MITO = 3
     
     def __init__(
         self,
-        root_dir: str,
+        root_dir: Union[str, Path],
         split: str = "train",
-        transform: Optional[Callable] = None,
+        transform=None,
         cache_rate: float = 1.0,
         train_val_split: float = 0.2,
-        samples: Optional[List[str]] = None,
-        include_synapses: bool = True,
-        slice_mode: bool = True,
         num_workers: int = 0,
+        volumes: List[str] = ["A", "B"],
+        include_clefts: bool = True,
+        include_mito: bool = False,
+        **kwargs,
     ):
-        self.samples = samples if samples is not None else ["A", "B", "C"]
-        self.include_synapses = include_synapses
-        self.slice_mode = slice_mode
-        self._hdf5_preprocessor = HDF5Preprocessor()
+        """
+        Initialize CREMI3D dataset.
         
-        # Validate samples
-        valid_samples = ["A", "B", "C"]
-        for s in self.samples:
-            if s.upper() not in valid_samples:
-                raise ValueError(
-                    f"Invalid sample '{s}'. Must be one of {valid_samples}"
-                )
-        self.samples = [s.upper() for s in self.samples]
+        Args:
+            root_dir: Root directory containing CREMI data.
+            split: "train", "valid", or "test".
+            transform: Optional transforms to apply.
+            cache_rate: Fraction of data to cache in memory.
+            train_val_split: Fraction for validation split.
+            num_workers: Number of workers for data loading.
+            volumes: List of volume names ["A", "B", "C"].
+            include_clefts: Include synaptic cleft annotations.
+            include_mito: Include mitochondria annotations.
+        """
+        self.volumes = volumes
+        self.include_clefts = include_clefts
+        self.include_mito = include_mito
+        self._image_data = None
+        self._label_data = None
         
         super().__init__(
             root_dir=root_dir,
@@ -111,168 +106,259 @@ class CREMI3DDataset(BaseConnectomicsDataset):
     
     @property
     def paper(self) -> str:
-        return self._paper
+        """Reference for CREMI dataset."""
+        return "CREMI Challenge - https://cremi.org/"
     
     @property
     def resolution(self) -> Dict[str, float]:
-        return self._resolution.copy()
+        """Voxel resolution in nanometers (4nm x 4nm x 40nm)."""
+        return {"x": 4.0, "y": 4.0, "z": 40.0}
     
     @property
     def labels(self) -> List[str]:
-        if self.include_synapses:
-            return self._labels_with_synapse.copy()
-        return self._labels_base.copy()
+        """List of segmentation class labels."""
+        return ["background", "neuron", "cleft", "mito"]
     
     @property
     def data_files(self) -> Dict[str, Union[str, np.ndarray]]:
-        """Return expected data files for all samples."""
+        """Dictionary specifying volume and segmentation data sources."""
+        # Return cached data arrays if available
+        if self._image_data is not None and self._label_data is not None:
+            return {"vol": self._image_data, "seg": self._label_data}
+        # Otherwise return file pattern
         return {
-            "vol": [f"sample_{s}" for s in self.samples],
-            "seg": [f"sample_{s}" for s in self.samples],
+            "vol": f"sample_*.h5/volumes/raw",
+            "seg": f"sample_*.h5/volumes/labels/neuron_ids",
         }
     
-    def _find_sample_file(self, sample: str) -> Optional[Path]:
-        """
-        Find sample file with supported naming conventions.
+    def _prepare_data(self) -> List[Dict[str, Any]]:
+        """Prepare list of data dictionaries for each sample."""
+        # Load all volumes
+        image, label = self._load_data()
+        self._image_data = image
+        self._label_data = label
         
-        Args:
-            sample: Sample identifier ('A', 'B', or 'C').
+        # Calculate split indices based on Z dimension
+        total_slices = image.shape[0]
         
-        Returns:
-            Path to file if found, None otherwise.
-        """
-        # Try different naming conventions
-        patterns = [
-            f"sample_{sample}_20160501.hdf",
-            f"sample_{sample}_20160501.h5",
-            f"sample_{sample}.hdf",
-            f"sample_{sample}.h5",
-            f"sample_{sample.lower()}.hdf",
-            f"sample_{sample.lower()}.h5",
+        # Determine volume name for metadata
+        volumes_str = "_".join(self.volumes)
+        
+        if self.split == "test":
+            # Test uses last 20% or separate test volume
+            start_idx = int(total_slices * (1 - self.train_val_split))
+            image = image[start_idx:]
+            label = label[start_idx:]
+            volume_name = f"CREMI_{volumes_str}_test"
+        elif self.split == "valid":
+            # Validation uses train_val_split fraction
+            val_start = int(total_slices * (1 - self.train_val_split))
+            image = image[val_start:]
+            label = label[val_start:]
+            volume_name = f"CREMI_{volumes_str}_valid"
+        else:  # train
+            # Training uses first (1 - train_val_split) fraction
+            train_end = int(total_slices * (1 - self.train_val_split))
+            image = image[:train_end]
+            label = label[:train_end]
+            volume_name = f"CREMI_{volumes_str}_train"
+        
+        # Return single data dict (whole volume as one sample)
+        # Include 'volume' and 'idx' keys to match SNEMI3D format
+        return [{
+            "image": image,
+            "label": label,
+            "volume": volume_name,
+            "idx": 0,
+        }]
+    
+    def _load_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Load and merge CREMI volumes."""
+        all_images = []
+        all_labels = []
+        
+        for vol_name in self.volumes:
+            image, label = self._load_volume(vol_name)
+            if image is not None:
+                all_images.append(image)
+                all_labels.append(label)
+        
+        if not all_images:
+            raise ValueError(f"No data found in {self.root_dir}")
+        
+        # Concatenate volumes along Z axis
+        images = np.concatenate(all_images, axis=0)
+        labels = np.concatenate(all_labels, axis=0)
+        
+        return images, labels
+    
+    def _load_volume(
+        self,
+        vol_name: str,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Load a single CREMI volume."""
+        # Try different file naming conventions used by CREMI
+        possible_paths = [
+            # Standard CREMI challenge format
+            self.root_dir / f"sample_{vol_name}_20160501.hdf",
+            self.root_dir / f"sample_{vol_name}+_20160601.hdf",
+            self.root_dir / f"sample_{vol_name}_padded_20160501.hdf",
+            # Common variants
+            self.root_dir / f"sample_{vol_name}.h5",
+            self.root_dir / f"sample_{vol_name}.hdf5",
+            self.root_dir / f"sample_{vol_name}.hdf",
+            self.root_dir / vol_name / "sample.h5",
         ]
         
-        for pattern in patterns:
-            path = self.root_dir / pattern
+        h5_path = None
+        for path in possible_paths:
             if path.exists():
-                return path
+                h5_path = path
+                break
         
-        return None
+        if h5_path is None:
+            # Try separate files
+            return self._load_volume_separate_files(vol_name)
+        
+        # Load from single HDF5 file
+        try:
+            import h5py
+            with h5py.File(h5_path, "r") as f:
+                # Standard CREMI format
+                if "volumes/raw" in f:
+                    image = f["volumes/raw"][:]
+                elif "raw" in f:
+                    image = f["raw"][:]
+                else:
+                    print(f"Warning: No raw data found in {h5_path}")
+                    return None, None
+                
+                # Load neuron labels
+                label = np.zeros_like(image, dtype=np.int64)
+                
+                if "volumes/labels/neuron_ids" in f:
+                    neuron_ids = f["volumes/labels/neuron_ids"][:]
+                    label[neuron_ids > 0] = neuron_ids[neuron_ids > 0] + self.NEURON_ID_OFFSET
+                elif "neuron_ids" in f:
+                    neuron_ids = f["neuron_ids"][:]
+                    label[neuron_ids > 0] = neuron_ids[neuron_ids > 0] + self.NEURON_ID_OFFSET
+                
+                # Load cleft labels (optional)
+                if self.include_clefts:
+                    if "volumes/labels/clefts" in f:
+                        cleft_ids = f["volumes/labels/clefts"][:]
+                        label[cleft_ids > 0] = cleft_ids[cleft_ids > 0] + self.CLEFT_ID_OFFSET
+                    elif "clefts" in f:
+                        cleft_ids = f["clefts"][:]
+                        label[cleft_ids > 0] = cleft_ids[cleft_ids > 0] + self.CLEFT_ID_OFFSET
+                
+                # Load mito labels (optional)
+                if self.include_mito:
+                    if "volumes/labels/mitochondria" in f:
+                        mito_ids = f["volumes/labels/mitochondria"][:]
+                        label[mito_ids > 0] = mito_ids[mito_ids > 0] + self.MITO_ID_OFFSET
+                    elif "mitochondria" in f:
+                        mito_ids = f["mitochondria"][:]
+                        label[mito_ids > 0] = mito_ids[mito_ids > 0] + self.MITO_ID_OFFSET
+                
+                return image.astype(np.float32), label
+                
+        except Exception as e:
+            print(f"Warning: Failed to load {h5_path}: {e}")
+            return None, None
     
-    def _load_sample(self, sample: str) -> Dict[str, np.ndarray]:
-        """
-        Load all data from a CREMI sample file.
-        
-        Args:
-            sample: Sample identifier ('A', 'B', or 'C').
-        
-        Returns:
-            Dictionary with 'raw', 'neuron_ids', and optionally 'clefts'.
-        
-        Raises:
-            FileNotFoundError: If sample file is not found.
-        """
-        path = self._find_sample_file(sample)
-        
-        if path is None:
-            raise FileNotFoundError(
-                f"Could not find CREMI sample_{sample} in {self.root_dir}.\n"
-                f"Expected files like: sample_{sample}_20160501.hdf, "
-                f"sample_{sample}.h5, etc.\n"
-                f"Please download from: https://cremi.org/data/"
-            )
-        
+    def _load_volume_separate_files(
+        self,
+        vol_name: str,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Load volume from separate files."""
         import h5py
         
-        data = {}
-        with h5py.File(path, "r") as f:
-            # Load raw data
-            if self._RAW_PATH in f:
-                data["raw"] = f[self._RAW_PATH][:]
-            else:
-                raise KeyError(
-                    f"Raw data not found at '{self._RAW_PATH}' in {path}"
-                )
-            
-            # Load neuron segmentation
-            if self._NEURON_PATH in f:
-                data["neuron_ids"] = f[self._NEURON_PATH][:]
-            else:
-                raise KeyError(
-                    f"Neuron labels not found at '{self._NEURON_PATH}' in {path}"
-                )
-            
-            # Load synaptic clefts (optional)
-            if self.include_synapses and self._CLEFT_PATH in f:
-                data["clefts"] = f[self._CLEFT_PATH][:]
+        def load_h5(path):
+            """Load first dataset from HDF5 file."""
+            with h5py.File(path, "r") as f:
+                # Get first dataset
+                def find_dataset(group):
+                    for key in group.keys():
+                        if isinstance(group[key], h5py.Dataset):
+                            return group[key][:]
+                        elif isinstance(group[key], h5py.Group):
+                            result = find_dataset(group[key])
+                            if result is not None:
+                                return result
+                    return None
+                return find_dataset(f)
         
-        return data
+        # Try to load raw image
+        raw_paths = [
+            self.root_dir / f"sample_{vol_name}_raw.h5",
+            self.root_dir / f"{vol_name}_raw.h5",
+            self.root_dir / f"{vol_name}_image.h5",
+        ]
+        
+        image = None
+        for path in raw_paths:
+            if path.exists():
+                image = load_h5(str(path))
+                break
+        
+        if image is None:
+            return None, None
+        
+        label = np.zeros_like(image, dtype=np.int64)
+        
+        # Load neuron labels
+        neuron_paths = [
+            self.root_dir / f"sample_{vol_name}_neuron_ids.h5",
+            self.root_dir / f"{vol_name}_neuron_ids.h5",
+            self.root_dir / f"{vol_name}_labels.h5",
+        ]
+        
+        for path in neuron_paths:
+            if path.exists():
+                neuron_ids = load_h5(str(path))
+                label[neuron_ids > 0] = neuron_ids[neuron_ids > 0] + self.NEURON_ID_OFFSET
+                break
+        
+        # Load cleft labels
+        if self.include_clefts:
+            cleft_paths = [
+                self.root_dir / f"sample_{vol_name}_clefts.h5",
+                self.root_dir / f"{vol_name}_clefts.h5",
+            ]
+            for path in cleft_paths:
+                if path.exists():
+                    cleft_ids = load_h5(str(path))
+                    label[cleft_ids > 0] = cleft_ids[cleft_ids > 0] + self.CLEFT_ID_OFFSET
+                    break
+        
+        return image.astype(np.float32), label
     
-    def _prepare_data(self) -> List[Dict[str, Any]]:
+    def get_class_mapping(self) -> Dict[str, List[int]]:
         """
-        Prepare data dictionaries based on split.
-        
-        Combines data from all specified samples and splits according
-        to train_val_split.
+        Get mapping from class name to instance ID ranges.
         
         Returns:
-            List of dictionaries with 'image', 'label', and metadata.
+            Dict mapping class names to ID ranges.
         """
-        data_list = []
-        
-        # Determine which samples to use for each split
-        # Use all samples for train/valid, split within each sample
-        for sample in self.samples:
-            try:
-                sample_data = self._load_sample(sample)
-            except FileNotFoundError as e:
-                if self.split == "test":
-                    continue  # Skip missing samples in test mode
-                raise
-            
-            raw = sample_data["raw"]
-            neuron_ids = sample_data["neuron_ids"]
-            clefts = sample_data.get("clefts", None)
-            
-            n_total = raw.shape[0]
-            n_train = int(n_total * (1.0 - self.train_val_split))
-            
-            if self.split == "train":
-                slice_range = range(n_train)
-            elif self.split == "valid":
-                slice_range = range(n_train, n_total)
-            else:  # test
-                slice_range = range(n_total)
-            
-            if self.slice_mode:
-                # Return individual 2D slices
-                for i in slice_range:
-                    data_dict = {
-                        "image": raw[i],
-                        "label": neuron_ids[i],
-                        "slice_idx": i,
-                        "sample": sample,
-                        "idx": len(data_list),
-                    }
-                    
-                    if clefts is not None:
-                        data_dict["clefts"] = clefts[i]
-                    
-                    data_list.append(data_dict)
-            else:
-                # Return 3D volume portion
-                vol_raw = raw[list(slice_range)]
-                vol_neuron = neuron_ids[list(slice_range)]
-                
-                data_dict = {
-                    "image": vol_raw,
-                    "label": vol_neuron,
-                    "sample": sample,
-                    "idx": len(data_list),
-                }
-                
-                if clefts is not None:
-                    data_dict["clefts"] = clefts[list(slice_range)]
-                
-                data_list.append(data_dict)
-        
-        return data_list
+        return {
+            "neuron": list(range(1, self.CLEFT_ID_OFFSET)),
+            "cleft": list(range(self.CLEFT_ID_OFFSET, self.MITO_ID_OFFSET)),
+            "mito": list(range(self.MITO_ID_OFFSET, self.MITO_ID_OFFSET + 100000)),
+        }
+    
+    def get_class_names(self) -> List[str]:
+        """Get list of class names."""
+        return ["background", "neuron", "cleft", "mito"]
+    
+    @staticmethod
+    def instance_id_to_class(instance_id: int) -> int:
+        """Map instance ID to semantic class ID."""
+        if instance_id == 0:
+            return CREMI3DDataset.CLASS_BACKGROUND
+        elif instance_id < CREMI3DDataset.CLEFT_ID_OFFSET:
+            return CREMI3DDataset.CLASS_NEURON
+        elif instance_id < CREMI3DDataset.MITO_ID_OFFSET:
+            return CREMI3DDataset.CLASS_CLEFT
+        else:
+            return CREMI3DDataset.CLASS_MITO

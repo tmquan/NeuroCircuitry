@@ -126,16 +126,16 @@ class Vista3DModule(pl.LightningModule):
         if self.use_ins_head:
             from neurocircuitry.losses.discriminative import DiscriminativeLossVectorized
             
-            disc_config = self.loss_config.get("discriminative", {})
-            self.discriminative_loss = DiscriminativeLossVectorized(
-                delta_var=disc_config.get("delta_var", 0.5),
-                delta_dist=disc_config.get("delta_dist", 1.5),
-                norm=disc_config.get("norm", 2),
-                alpha=disc_config.get("alpha", 1.0),
-                beta=disc_config.get("beta", 1.0),
-                gamma=disc_config.get("gamma", 0.001),
+            ins_config = self.loss_config.get("discriminative", {})
+            self.instance_loss = DiscriminativeLossVectorized(
+                delta_var=ins_config.get("delta_var", 0.5),
+                delta_dist=ins_config.get("delta_dist", 1.5),
+                norm=ins_config.get("norm", 2),
+                alpha=ins_config.get("alpha", 1.0),
+                beta=ins_config.get("beta", 1.0),
+                gamma=ins_config.get("gamma", 0.001),
             )
-            self.disc_loss_weight = self.loss_config.get("disc_weight", 1.0)
+            self.ins_loss_weight = self.loss_config.get("ins_weight", 1.0)
         
         # MONAI metrics for evaluation
         num_classes = self.model_config.get("num_classes", 2)
@@ -356,12 +356,12 @@ class Vista3DModule(pl.LightningModule):
         
         # Discriminative loss for instance embeddings
         if self.use_ins_head and embedding is not None and instance_labels is not None:
-            disc_loss, loss_var, loss_dist, loss_reg = self.discriminative_loss(
+            ins_loss, loss_var, loss_dst, loss_reg = self.instance_loss(
                 embedding, instance_labels
             )
-            losses["disc_loss"] = disc_loss
+            losses["ins_loss"] = ins_loss
             losses["loss_var"] = loss_var
-            losses["loss_dist"] = loss_dist
+            losses["loss_dst"] = loss_dst
             losses["loss_reg"] = loss_reg
         
         # Combined loss
@@ -373,8 +373,8 @@ class Vista3DModule(pl.LightningModule):
         if self.boundary_loss_weight > 0:
             total_loss += self.boundary_loss_weight * losses["boundary_loss"]
         
-        if self.use_ins_head and "disc_loss" in losses:
-            total_loss += self.disc_loss_weight * losses["disc_loss"]
+        if self.use_ins_head and "ins_loss" in losses:
+            total_loss += self.ins_loss_weight * losses["ins_loss"]
         
         losses["loss"] = total_loss
         
@@ -437,8 +437,8 @@ class Vista3DModule(pl.LightningModule):
             )
             
             # Get bandwidth from discriminative loss config
-            disc_config = self.loss_config.get("discriminative", {})
-            bandwidth = disc_config.get("delta_var", 0.5)
+            ins_config = self.loss_config.get("discriminative", {})
+            bandwidth = ins_config.get("delta_var", 0.5)
             
             # Only compute for first sample (expensive)
             emb_first = embedding[0]  # [E, D, H, W]

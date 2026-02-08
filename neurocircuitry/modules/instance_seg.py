@@ -79,14 +79,14 @@ class InstanceSegmentationModule(pl.LightningModule):
         self.model = SegResNetWrapper(**model_config)
         
         # Loss functions
-        disc_config = loss_config.get("discriminative", {})
-        self.discriminative_loss = DiscriminativeLoss(
-            delta_var=disc_config.get("delta_var", 0.5),
-            delta_dist=disc_config.get("delta_dist", 1.5),
-            norm=disc_config.get("norm", 2),
-            alpha=disc_config.get("alpha", 1.0),
-            beta=disc_config.get("beta", 1.0),
-            gamma=disc_config.get("gamma", 0.001),
+        ins_config = loss_config.get("discriminative", {})
+        self.instance_loss = DiscriminativeLoss(
+            delta_var=ins_config.get("delta_var", 0.5),
+            delta_dist=ins_config.get("delta_dist", 1.5),
+            norm=ins_config.get("norm", 2),
+            alpha=ins_config.get("alpha", 1.0),
+            beta=ins_config.get("beta", 1.0),
+            gamma=ins_config.get("gamma", 0.001),
         )
         
         self.semantic_loss = nn.CrossEntropyLoss()
@@ -123,26 +123,26 @@ class InstanceSegmentationModule(pl.LightningModule):
         # Semantic loss: foreground (label > 0) vs background (label == 0)
         semantic_logits = outputs["logits"]
         semantic_target = (labels_squeezed > 0).long()
-        loss_semantic = self.semantic_loss(semantic_logits, semantic_target)
+        loss_sem = self.semantic_loss(semantic_logits, semantic_target)
         
         # Discriminative loss for instance embeddings
         embedding = outputs["embedding"]
-        loss_disc, loss_var, loss_dist, loss_reg = self.discriminative_loss(
+        loss_ins, loss_var, loss_dst, loss_reg = self.instance_loss(
             embedding, labels_squeezed
         )
         
         # Total loss
         total_loss = (
-            self.semantic_weight * loss_semantic +
-            self.instance_weight * loss_disc
+            self.semantic_weight * loss_sem +
+            self.instance_weight * loss_ins
         )
         
         return {
             "loss": total_loss,
-            "loss_semantic": loss_semantic,
-            "loss_disc": loss_disc,
+            "loss_sem": loss_sem,
+            "loss_ins": loss_ins,
             "loss_var": loss_var,
-            "loss_dist": loss_dist,
+            "loss_dst": loss_dst,
             "loss_reg": loss_reg,
         }
     
@@ -194,10 +194,10 @@ class InstanceSegmentationModule(pl.LightningModule):
         # Log losses
         batch_size = images.shape[0]
         self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, batch_size=batch_size)
-        self.log("train/loss_semantic", loss_dict["loss_semantic"], on_epoch=True, batch_size=batch_size)
-        self.log("train/loss_disc", loss_dict["loss_disc"], on_epoch=True, batch_size=batch_size)
+        self.log("train/loss_sem", loss_dict["loss_sem"], on_epoch=True, batch_size=batch_size)
+        self.log("train/loss_ins", loss_dict["loss_ins"], on_epoch=True, batch_size=batch_size)
         self.log("train/loss_var", loss_dict["loss_var"], on_epoch=True, batch_size=batch_size)
-        self.log("train/loss_dist", loss_dict["loss_dist"], on_epoch=True, batch_size=batch_size)
+        self.log("train/loss_dst", loss_dict["loss_dst"], on_epoch=True, batch_size=batch_size)
         
         return loss
     
@@ -220,8 +220,8 @@ class InstanceSegmentationModule(pl.LightningModule):
         # Log metrics
         batch_size = images.shape[0]
         self.log("val/loss", loss_dict["loss"], prog_bar=True, batch_size=batch_size)
-        self.log("val/loss_semantic", loss_dict["loss_semantic"], batch_size=batch_size)
-        self.log("val/loss_disc", loss_dict["loss_disc"], batch_size=batch_size)
+        self.log("val/loss_sem", loss_dict["loss_sem"], batch_size=batch_size)
+        self.log("val/loss_ins", loss_dict["loss_ins"], batch_size=batch_size)
         self.log("val/iou", metrics["iou"], prog_bar=True, batch_size=batch_size)
         self.log("val/accuracy", metrics["accuracy"], batch_size=batch_size)
         

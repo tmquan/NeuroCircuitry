@@ -2,15 +2,19 @@
 SNEMI3D DataModule for PyTorch Lightning.
 """
 
-from typing import Optional
+from typing import List, Optional, Tuple, Union
 
+import numpy as np
 from monai.transforms import (
+    CastToTyped,
     Compose,
     EnsureChannelFirstd,
     RandFlipd,
     RandRotate90d,
     RandGaussianNoised,
     RandAdjustContrastd,
+    RandSpatialCropd,
+    SpatialPadd,
     ScaleIntensityd,
     ToTensord,
     Resized,
@@ -34,20 +38,21 @@ class SNEMI3DDataModule(BaseConnectomicsDataModule):
         train_val_split: Validation fraction (default: 0.2).
         cache_rate: Cache fraction (default: 0.5).
         pin_memory: Pin memory for GPU transfer (default: True).
-        image_size: Optional resize dimensions (H, W).
-        slice_mode: Return 2D slices if True (default: True).
+        image_size: Optional resize dimensions (D, H, W).
+        patch_size: Random crop size (D, H, W) for training.
+        slice_mode: Return 2D slices if True (default: False for 3D).
     
     Example:
         >>> dm = SNEMI3DDataModule(
         ...     data_root="/path/to/snemi3d",
         ...     batch_size=8,
-        ...     num_workers=4
+        ...     patch_size=(32, 128, 128),
         ... )
         >>> dm.setup("fit")
         >>> 
         >>> for batch in dm.train_dataloader():
-        ...     images = batch["image"]  # [B, 1, H, W]
-        ...     labels = batch["label"]  # [B, 1, H, W]
+        ...     images = batch["image"]  # [B, 1, D, H, W]
+        ...     labels = batch["label"]  # [B, 1, D, H, W]
     """
     
     dataset_class = SNEMI3DDataset
@@ -60,11 +65,13 @@ class SNEMI3DDataModule(BaseConnectomicsDataModule):
         train_val_split: float = 0.2,
         cache_rate: float = 0.5,
         pin_memory: bool = True,
-        image_size: Optional[tuple] = None,
-        slice_mode: bool = True,
+        image_size: Optional[Tuple[int, ...]] = None,
+        patch_size: Optional[Union[Tuple[int, ...], List[int]]] = None,
+        slice_mode: bool = False,
         persistent_workers: bool = True,
     ):
         self.slice_mode = slice_mode
+        self.patch_size = tuple(patch_size) if patch_size is not None else None
         super().__init__(
             data_root=data_root,
             batch_size=batch_size,
@@ -86,15 +93,25 @@ class SNEMI3DDataModule(BaseConnectomicsDataModule):
         Returns:
             MONAI Compose transform pipeline with EM-specific augmentations.
         """
+        keys = ["image", "label"]
         transforms = [
-            EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
+            # Ensure proper dtypes for consistent batching
+            CastToTyped(keys=["image"], dtype=np.float32),
+            CastToTyped(keys=["label"], dtype=np.int64),
+            EnsureChannelFirstd(keys=keys, channel_dim="no_channel"),
             ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
         ]
         
-        if self.image_size is not None:
+        # Add random cropping if patch_size specified
+        if self.patch_size is not None:
+            transforms.extend([
+                SpatialPadd(keys=keys, spatial_size=self.patch_size),
+                RandSpatialCropd(keys=keys, roi_size=self.patch_size, random_size=False),
+            ])
+        elif self.image_size is not None:
             transforms.append(
                 Resized(
-                    keys=["image", "label"],
+                    keys=keys,
                     spatial_size=self.image_size,
                     mode=["bilinear", "nearest"],
                 )
@@ -102,14 +119,42 @@ class SNEMI3DDataModule(BaseConnectomicsDataModule):
         
         # EM-specific augmentations
         transforms.extend([
-            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
-            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
-            RandRotate90d(keys=["image", "label"], prob=0.5, spatial_axes=(0, 1)),
-            # Stronger noise for EM robustness
+            RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
+            RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
+            RandRotate90d(keys=keys, prob=0.5, spatial_axes=(1, 2)),  # Rotate on YX plane only
             RandGaussianNoised(keys=["image"], prob=0.3, mean=0.0, std=0.1),
-            # Contrast variation common in EM
             RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.7, 1.3)),
-            ToTensord(keys=["image", "label"]),
+            ToTensord(keys=keys),
         ])
+        
+        return Compose(transforms)
+    
+    def get_val_transforms(self) -> Compose:
+        """Get validation transforms with consistent cropping."""
+        keys = ["image", "label"]
+        transforms = [
+            # Ensure proper dtypes for consistent batching
+            CastToTyped(keys=["image"], dtype=np.float32),
+            CastToTyped(keys=["label"], dtype=np.int64),
+            EnsureChannelFirstd(keys=keys, channel_dim="no_channel"),
+            ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
+        ]
+        
+        # Use same cropping for validation to ensure consistent sizes
+        if self.patch_size is not None:
+            transforms.extend([
+                SpatialPadd(keys=keys, spatial_size=self.patch_size),
+                RandSpatialCropd(keys=keys, roi_size=self.patch_size, random_size=False),
+            ])
+        elif self.image_size is not None:
+            transforms.append(
+                Resized(
+                    keys=keys,
+                    spatial_size=self.image_size,
+                    mode=["bilinear", "nearest"],
+                )
+            )
+        
+        transforms.append(ToTensord(keys=keys))
         
         return Compose(transforms)

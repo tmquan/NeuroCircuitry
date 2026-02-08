@@ -1,0 +1,207 @@
+# =============================================================================
+# CREMI3D Vista3D Configuration
+# =============================================================================
+# Training Vista3D model on CREMI challenge dataset.
+#
+# CREMI3D data:
+#   - 3 volumes: A, B, C (each ~125 x 1250 x 1250)
+#   - Annotations: neurons, synaptic clefts (optional: mitochondria)
+#   - Resolution: 4nm x 4nm x 40nm (anisotropic)
+#
+# Data format (instance segmentation challenge format):
+# - 'image': input EM volume [Z, Y, X]
+# - 'label': indexed instance segmentation (unique IDs per object)
+# - 'class_ids': semantic class (background=0, neuron=1, cleft=2, mito=3)
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=0 python scripts/train_vista3d.py --config configs/cremi3d_vista3d.yaml
+# =============================================================================
+
+experiment_name: cremi3d_vista3d
+project_name: neurocircuitry-vista3d
+seed: 42
+logger: tensorboard
+log_dir: logs
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+# CREMI3D data dimensions vary per volume (~125 x 1250 x 1250)
+# Z resolution is ~40nm, XY resolution is ~4nm (10x anisotropic)
+# =============================================================================
+data:
+  dataset: cremi3d
+  data_root: data/CREMI3D
+  
+  # Volumes to use for training
+  # A, B have ground truth; C is test (no labels)
+  train_volumes: ["A", "B"]
+  test_volumes: ["C"]
+  
+  # 3D patch size [Z, Y, X]
+  # Smaller Z due to anisotropic resolution
+  patch_size: [16, 128, 128]
+  
+  batch_size: 4
+  
+  num_workers: 4
+  cache_rate: 1.0
+  
+  num_train_samples: 800
+  num_val_samples: 200
+  
+  train_val_split: 0.2
+  
+  augmentation: true
+  
+  # Semantic class configuration for CREMI
+  semantic_classes:
+    names: ["background", "neuron", "cleft", "mito"]
+    
+    # Instance ID to class mapping
+    # CREMI stores different structures in separate files:
+    # - neuron_ids.h5: neuron instance segmentation
+    # - cleft_ids.h5: synaptic cleft instances (if available)
+    # - mito_ids.h5: mitochondria instances (if available)
+    #
+    # When loading, we merge them with offset IDs:
+    # - Neurons: IDs 1-10000
+    # - Clefts: IDs 10001-20000
+    # - Mito: IDs 20001-30000
+    instance_ids:
+      neuron: null  # Will be filled with actual IDs after loading
+      cleft: null
+      mito: null
+    
+    # ID ranges for each class (used during data loading)
+    id_ranges:
+      neuron: [1, 10000]
+      cleft: [10001, 20000]
+      mito: [20001, 30000]
+    
+    default_class: 1  # Unmapped foreground defaults to neuron
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  encoder_name: segresnet
+  feature_size: 48
+  
+  in_channels: 1
+  num_classes: 4  # background, neuron, cleft, mito
+  
+  sem_head: 16
+  ins_head: 16
+  use_sem_head: true
+  use_ins_head: true
+  
+  pretrained: false
+  freeze_encoder: false
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  mode: auto
+  num_point_prompts: 5
+  
+  max_epochs: 200
+  
+  accelerator: gpu
+  devices: 1
+  strategy: auto
+  
+  precision: 16-mixed
+  
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  
+  val_check_interval: 1.0
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  
+  log_every_n_steps: 10
+  
+  benchmark: true
+  deterministic: false
+  
+  fast_dev_run: false
+
+# =============================================================================
+# Optimizer Configuration
+# =============================================================================
+optimizer:
+  type: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+  
+  scheduler:
+    type: cosine
+    T_max: 200
+    eta_min: 1.0e-7
+
+# =============================================================================
+# Loss Configuration
+# =============================================================================
+loss:
+  ce_weight: 0.5
+  dice_weight: 0.5
+  boundary_weight: 0.1
+  
+  ins_weight: 1.0
+  
+  discriminative:
+    delta_var: 0.5
+    delta_dist: 1.5
+    norm: 2
+    alpha: 1.0
+    beta: 1.0
+    gamma: 0.001
+  
+  # Class weights: background, neuron, cleft, mito
+  # Neurons are dominant, clefts are rare, mito medium
+  class_weights: [0.1, 0.3, 0.4, 0.2]
+  
+  ignore_index: -100
+
+# =============================================================================
+# Callbacks Configuration
+# =============================================================================
+callbacks:
+  checkpoint:
+    enabled: true
+    dirpath: null
+    filename: "cremi3d-{epoch:02d}-{val/dice:.4f}"
+    save_top_k: 3
+    monitor: val/dice
+    mode: max
+    save_last: true
+  
+  early_stopping:
+    enabled: true
+    monitor: val/dice
+    patience: 50
+    mode: max
+  
+  tensorboard_volume:
+    enabled: true
+    log_every_n_epochs: 1
+    num_slices: 4
+    slice_axes: ["axial"]
+    max_samples: 2
+    log_train: true
+    log_val: true
+    log_embeddings: true
+    log_instances: true
+    clustering_bandwidth: 0.5
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+inference:
+  patch_size: [16, 128, 128]
+  stride: [8, 64, 64]
+  aggregation: gaussian
+  batch_size: 4
