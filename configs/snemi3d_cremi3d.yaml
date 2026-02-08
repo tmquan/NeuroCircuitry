@@ -99,9 +99,9 @@ model:
   
   # Input/Output
   in_channels: 1
-  # num_classes should match data.semantic_classes
-  # With CREMI3D enabled: 4 classes (background, neuron, cleft, mito)
-  num_classes: 4  # 0=background, 1=neuron, 2=cleft, 3=mito
+  # NOTE: num_classes is auto-derived from data.semantic_classes.names
+  # This is overridden at runtime by the training script
+  # num_classes: 4  # 0=background, 1=neuron, 2=cleft, 3=mito
   
   # Semantic and Instance heads (following ariel architecture)
   sem_head: 16  # Semantic embedding dimension
@@ -224,7 +224,7 @@ callbacks:
   
   tensorboard_volume:
     enabled: true
-    log_every_n_epochs: 5  # Log volume slices every N epochs
+    log_every_n_epochs: 1  # Log volume slices every N epochs
     num_slices: 4          # Number of slices to visualize (horizontal row)
     # For tensor [Z, Y, X] = [D, H, W]:
     # - "axial": slice through Z, view Y-X plane (typical EM microscope view)

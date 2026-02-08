@@ -607,6 +607,18 @@ def get_module(cfg: DictConfig) -> pl.LightningModule:
     if isinstance(patch_size, list):
         patch_size = tuple(patch_size)
     
+    # Derive num_classes from semantic_classes.names (master labels list)
+    # This ensures model output matches the number of semantic classes
+    semantic_cfg = cfg.data.get("semantic_classes", {})
+    class_names = semantic_cfg.get("names", ["background", "neuron"])
+    if isinstance(class_names, (list, tuple)):
+        class_names = list(class_names)
+    num_classes = len(class_names)
+    
+    # Override model config with derived num_classes
+    model_cfg["num_classes"] = num_classes
+    print(f"Using {num_classes} semantic classes: {class_names}")
+    
     return Vista3DModule(
         model_config=model_cfg,
         optimizer_config=optimizer_cfg,

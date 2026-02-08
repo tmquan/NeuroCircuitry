@@ -4,7 +4,7 @@ Vista3D Lightning Module for training and inference.
 Supports both automatic segmentation and interactive point-based segmentation.
 Features:
 - Semantic head (sem_head) for foreground/background classification
-- Instance head (ins_head) for pixel embeddings with discriminative loss
+- Instance head (ins_head) for pixel ws with discriminative loss
 - ARI/AMI metrics for instance segmentation evaluation
 - Label relabeling after cropping
 - MONAI MeanDice and MeanIoU metrics
@@ -90,7 +90,7 @@ class Vista3DModule(pl.LightningModule):
             use_automatic_mode=self.training_mode in ["auto", "mixed"],
         )
         
-        # Semantic embedding head: projects features to sem_head_dim then to num_classes
+        # Semantic w head: projects features to sem_head_dim then to num_classes
         if self.use_sem_head:
             self.sem_head = nn.Sequential(
                 nn.Conv3d(num_classes, self.sem_head_dim, kernel_size=3, padding=1),
@@ -102,7 +102,7 @@ class Vista3DModule(pl.LightningModule):
             # Identity: use base model output directly
             self.sem_head = nn.Identity()
         
-        # Instance embedding head: projects features to ins_head_dim dimensional embeddings
+        # Instance w head: projects features to ins_head_dim dimensional embedss
         if self.use_ins_head:
             self.ins_head = nn.Sequential(
                 nn.Conv3d(num_classes, self.ins_head_dim * 2, kernel_size=3, padding=1),
@@ -122,7 +122,7 @@ class Vista3DModule(pl.LightningModule):
         self.ce_loss_weight = self.loss_config.get("ce_weight", 0.5)
         self.boundary_loss_weight = self.loss_config.get("boundary_weight", 0.0)
         
-        # Discriminative loss for instance embeddings
+        # Discriminative loss for instance embedss
         if self.use_ins_head:
             from neurocircuitry.losses.discriminative import DiscriminativeLossVectorized
             
@@ -163,34 +163,34 @@ class Vista3DModule(pl.LightningModule):
         Returns:
             Dict with:
                 - 'logits': Semantic logits [B, num_classes, D, H, W]
-                - 'embeds': Instance embeddings [B, ins_head_dim, D, H, W] (if use_ins_head)
+                - 'embeds': Instance embedss [B, ins_head_dim, D, H, W] (if use_ins_head)
                 - 'labels': Semantic labels after sem_head [B, num_classes, D, H, W]
                 - 'membrs': Membrane/boundary predictions (if available)
         """
-        # Get base model outputs
-        base_outputs = self.model(
+        # Get base model result
+        base_result = self.model(
             x,
             point_coords=point_coords,
             point_labels=point_labels,
             class_ids=class_ids,
         )
         
-        logits = base_outputs["logits"]
+        logits = base_result["logits"]
         
         # Apply semantic head (or identity if use_sem_head=False)
         semantic = self.sem_head(logits)
         
-        outputs = {
+        result = {
             "logits": semantic,  # Use semantic head output as final logits
             "labels": semantic,
         }
         
-        # Apply instance embedding head
+        # Apply instance embeds head
         if self.use_ins_head:
             embeds = self.ins_head(logits)
-            outputs["embeds"] = embeds
+            result["embeds"] = embeds
         
-        return outputs
+        return result
     
     def _sample_point_prompts(
         self,
@@ -296,22 +296,37 @@ class Vista3DModule(pl.LightningModule):
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute boundary-aware loss using gradient magnitude."""
-        # Compute predicted boundaries
-        probs = F.softmax(logits, dim=1)[:, 1:]  # Foreground prob
+        """
+        Compute boundary-aware loss using gradient magnitude.
         
-        # Sobel-like gradient
+        Handles multi-class by converting labels to one-hot and computing
+        per-class boundary gradients.
+        
+        Args:
+            logits: [B, C, D, H, W] where C is num_classes
+            labels: [B, D, H, W] with class indices 0..C-1
+        """
+        num_classes = logits.shape[1]
+        
+        # Compute predicted class probabilities: [B, C, D, H, W]
+        probs = F.softmax(logits, dim=1)
+        
+        # Convert labels to one-hot: [B, D, H, W] -> [B, C, D, H, W]
+        labels_clamped = torch.clamp(labels.long(), 0, num_classes - 1)
+        labels_one_hot = F.one_hot(labels_clamped, num_classes)
+        labels_float = rearrange(labels_one_hot, "b d h w c -> b c d h w").float()
+        
+        # Compute gradients for predicted probabilities
         grad_x = probs[:, :, :, :, 1:] - probs[:, :, :, :, :-1]
         grad_y = probs[:, :, :, 1:, :] - probs[:, :, :, :-1, :]
         grad_z = probs[:, :, 1:, :, :] - probs[:, :, :-1, :, :]
         
-        # Ground truth boundaries: [B, D, H, W] -> [B, 1, D, H, W]
-        labels_float = rearrange(labels.float(), "b d h w -> b 1 d h w")
+        # Compute gradients for ground truth
         gt_grad_x = labels_float[:, :, :, :, 1:] - labels_float[:, :, :, :, :-1]
         gt_grad_y = labels_float[:, :, :, 1:, :] - labels_float[:, :, :, :-1, :]
         gt_grad_z = labels_float[:, :, 1:, :, :] - labels_float[:, :, :-1, :, :]
         
-        # Boundary loss
+        # Boundary loss: MSE between gradient magnitudes
         loss_x = F.mse_loss(grad_x.abs(), gt_grad_x.abs())
         loss_y = F.mse_loss(grad_y.abs(), gt_grad_y.abs())
         loss_z = F.mse_loss(grad_z.abs(), gt_grad_z.abs())
@@ -322,16 +337,16 @@ class Vista3DModule(pl.LightningModule):
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        embedding: Optional[torch.Tensor] = None,
+        embeds: Optional[torch.Tensor] = None,
         instance_labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute combined loss including discriminative loss for instance segmentation.
+        Compute combined loss including instance loss for instance segmentation.
         
         Args:
             logits: Semantic logits [B, num_classes, D, H, W].
-            labels: Binary labels [B, D, H, W] (0=background, 1=foreground).
-            embedding: Instance embeddings [B, E, D, H, W] (optional).
+            labels: Semantic class labels [B, D, H, W] with class indices 0..num_classes-1.
+            embeds: Instance embedss [B, E, D, H, W] (optional).
             instance_labels: Instance labels [B, D, H, W] with unique IDs per instance (optional).
         """
         losses = {}
@@ -354,10 +369,10 @@ class Vista3DModule(pl.LightningModule):
             boundary_loss = self._compute_boundary_loss(logits, labels)
             losses["boundary_loss"] = boundary_loss
         
-        # Discriminative loss for instance embeddings
-        if self.use_ins_head and embedding is not None and instance_labels is not None:
+        # Discriminative loss for instance embedss
+        if self.use_ins_head and embeds is not None and instance_labels is not None:
             ins_loss, loss_var, loss_dst, loss_reg = self.instance_loss(
-                embedding, instance_labels
+                embeds, instance_labels
             )
             losses["ins_loss"] = ins_loss
             losses["loss_var"] = loss_var
@@ -384,7 +399,7 @@ class Vista3DModule(pl.LightningModule):
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        embedding: Optional[torch.Tensor] = None,
+        embeds: Optional[torch.Tensor] = None,
         instance_labels: Optional[torch.Tensor] = None,
         compute_instance_metrics: bool = False,
     ) -> Dict[str, torch.Tensor]:
@@ -393,11 +408,14 @@ class Vista3DModule(pl.LightningModule):
         
         Args:
             logits: Semantic logits [B, num_classes, D, H, W].
-            labels: Binary labels [B, D, H, W].
-            embedding: Instance embeddings [B, E, D, H, W] (optional).
+            labels: Semantic class labels [B, D, H, W] with class indices 0..num_classes-1.
+            embeds: Instance embedss [B, E, D, H, W] (optional).
             instance_labels: Ground truth instance labels [B, D, H, W] (optional).
             compute_instance_metrics: Whether to compute ARI/AMI (expensive).
         """
+
+        metrics = {}
+
         num_classes = logits.shape[1]
         
         # Get predictions as one-hot: [B, D, H, W] -> [B, C, D, H, W]
@@ -405,9 +423,9 @@ class Vista3DModule(pl.LightningModule):
         preds_one_hot = F.one_hot(preds, num_classes)
         preds_one_hot = rearrange(preds_one_hot, "b d h w c -> b c d h w")
         
-        # Ensure labels are binary (0 or 1) and convert to one-hot
-        labels_binary = (labels > 0).long()
-        labels_one_hot = F.one_hot(labels_binary, num_classes)
+        # Use actual class labels (clamped to valid range) for multi-class metrics
+        labels_clamped = torch.clamp(labels.long(), 0, num_classes - 1)
+        labels_one_hot = F.one_hot(labels_clamped, num_classes)
         labels_one_hot = rearrange(labels_one_hot, "b d h w c -> b c d h w")
         
         # MONAI MeanDice metric
@@ -421,19 +439,17 @@ class Vista3DModule(pl.LightningModule):
         mean_iou = self.iou_metric.aggregate()
         
         # Accuracy (simple pixel-wise)
-        accuracy = (preds == labels_binary).float().mean()
+        accuracy = (preds == labels_clamped).float().mean()
         
-        metrics = {
-            "accuracy": accuracy,
-            "dice": mean_dice,
-            "iou": mean_iou,
-        }
+        metrics["accuracy"] = accuracy
+        metrics["dice"] = mean_dice
+        metrics["iou"] = mean_iou
         
         # Compute ARI/AMI for instance segmentation (expensive, only first sample)
-        if compute_instance_metrics and self.use_ins_head and embedding is not None and instance_labels is not None:
+        if compute_instance_metrics and self.use_ins_head and embeds is not None and instance_labels is not None:
             from neurocircuitry.utils.labels import (
                 compute_ari_ami,
-                cluster_embeddings_meanshift,
+                cluster_embedss_meanshift,
             )
             
             # Get bandwidth from discriminative loss config
@@ -441,12 +457,12 @@ class Vista3DModule(pl.LightningModule):
             bandwidth = ins_config.get("delta_var", 0.5)
             
             # Only compute for first sample (expensive)
-            emb_first = embedding[0]  # [E, D, H, W]
+            emb_first = embeds[0]  # [E, D, H, W]
             fg_mask = preds[0]  # [D, H, W]
             gt_labels = instance_labels[0]  # [D, H, W]
             
-            # Cluster embeddings to get predicted instances
-            pred_instances = cluster_embeddings_meanshift(
+            # Cluster embedss to get predicted instances
+            pred_instances = cluster_embedss_meanshift(
                 emb_first,
                 foreground_mask=fg_mask,
                 bandwidth=bandwidth,
@@ -487,9 +503,9 @@ class Vista3DModule(pl.LightningModule):
         """Training step with instance segmentation support.
         
         Batch keys (instance segmentation challenge format):
-        - 'image': input EM volume
-        - 'label': indexed instance segmentation (IDs: 1, 2, 3, ...)
-        - 'class_ids': semantic class mapping (background=0, foreground=1)
+        - 'image': input EM volume [B, C, D, H, W]
+        - 'label': indexed instance segmentation (unique IDs per instance)
+        - 'class_ids': semantic class labels (0=background, 1=neuron, 2=cleft, 3=mito)
         """
         images = batch["image"]
         instance_label = batch["label"]  # Instance IDs for discriminative loss
@@ -514,20 +530,21 @@ class Vista3DModule(pl.LightningModule):
         # Relabel instance labels after cropping (split instances get unique labels)
         instance_labels = self._relabel_after_crop(instance_label)
         
-        # Use class_ids directly (already 0=background, 1=foreground)
-        binary_labels = class_ids.long()
+        # Use class_ids directly for semantic segmentation
+        # Values: 0=background, 1=neuron, 2=cleft, 3=mito (multi-class)
+        semantic_labels = class_ids.long()
         
         # Forward pass based on training mode
         if self.training_mode == "auto":
             # Automatic mode with class labels
-            outputs = self.forward(images)
+            result = self.forward(images)
         
         elif self.training_mode == "interactive":
             # Interactive mode with point prompts
             point_coords, point_labels_prompt = self._sample_point_prompts(
-                binary_labels, self.num_point_prompts
+                semantic_labels, self.num_point_prompts
             )
-            outputs = self.forward(
+            result = self.forward(
                 images,
                 point_coords=point_coords,
                 point_labels=point_labels_prompt,
@@ -536,24 +553,24 @@ class Vista3DModule(pl.LightningModule):
         else:  # mixed
             # Alternate between modes
             if batch_idx % 2 == 0:
-                outputs = self.forward(images)
+                result = self.forward(images)
             else:
                 point_coords, point_labels_prompt = self._sample_point_prompts(
-                    binary_labels, self.num_point_prompts
+                    semantic_labels, self.num_point_prompts
                 )
-                outputs = self.forward(
+                result = self.forward(
                     images,
                     point_coords=point_coords,
                     point_labels=point_labels_prompt,
                 )
         
-        logits = outputs["logits"]
-        embedding = outputs.get("embeds")
+        logits = result["logits"]
+        embeds = result.get("embeds")
         
-        # Compute losses (semantic + discriminative)
+        # Compute losses (semantic + instance)
         losses = self._compute_loss(
-            logits, binary_labels,
-            embedding=embedding,
+            logits, semantic_labels,
+            embeds=embeds,
             instance_labels=instance_labels,
         )
         
@@ -595,26 +612,26 @@ class Vista3DModule(pl.LightningModule):
         # Relabel instance labels after cropping
         instance_labels = self._relabel_after_crop(instance_label)
         
-        # Use class_ids directly
-        binary_labels = class_ids.long()
+        # Use class_ids directly for semantic segmentation (multi-class)
+        semantic_labels = class_ids.long()
         
         # Use automatic mode for validation
-        outputs = self.forward(images)
-        logits = outputs["logits"]
-        embedding = outputs.get("embeds")
+        result = self.forward(images)
+        logits = result["logits"]
+        embeds = result.get("embeds")
         
-        # Compute losses (semantic + discriminative)
+        # Compute losses (semantic + instance)
         losses = self._compute_loss(
-            logits, binary_labels,
-            embedding=embedding,
+            logits, semantic_labels,
+            embeds=embeds,
             instance_labels=instance_labels,
         )
         
         # Compute metrics (including ARI/AMI on first batch only - expensive)
         compute_instance = (batch_idx == 0) and self.use_ins_head
         metrics = self._compute_metrics(
-            logits, binary_labels,
-            embedding=embedding,
+            logits, semantic_labels,
+            embeds=embeds,
             instance_labels=instance_labels,
             compute_instance_metrics=compute_instance,
         )
@@ -807,9 +824,9 @@ class Vista3DModule(pl.LightningModule):
                     
                     # Forward pass: [C, D, H, W] -> [1, C, D, H, W]
                     patch_input = rearrange(patch, "c d h w -> 1 c d h w").to(device)
-                    outputs = self.forward(patch_input)
+                    result = self.forward(patch_input)
                     # Remove batch dim: [1, num_classes, pd, ph, pw] -> [num_classes, pd, ph, pw]
-                    logits = rearrange(outputs["logits"], "1 c d h w -> c d h w")
+                    logits = rearrange(result["logits"], "1 c d h w -> c d h w")
                     
                     # Aggregate
                     output[
@@ -905,14 +922,14 @@ class Vista3DModule(pl.LightningModule):
         # Forward pass: [C, D, H, W] -> [1, C, D, H, W]
         patch_input = rearrange(patch, "c d h w -> 1 c d h w")
         # [N, 3] -> [1, N, 3], [N] -> [1, N]
-        outputs = self.forward(
+        result = self.forward(
             patch_input,
             point_coords=rearrange(local_coords, "n c -> 1 n c"),
             point_labels=rearrange(point_labels, "n -> 1 n"),
         )
         
         # Extract prediction: [1, num_classes, D, H, W] -> [num_classes, D, H, W]
-        logits = rearrange(outputs["logits"], "1 c d h w -> c d h w")
+        logits = rearrange(result["logits"], "1 c d h w -> c d h w")
         pred = logits.argmax(dim=0)
         
         # Place in output
