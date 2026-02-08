@@ -36,7 +36,7 @@ class InstanceSegmentationModule(pl.LightningModule):
         ...     "in_channels": 1,
         ...     "out_channels": 2,
         ...     "spatial_dims": 2,
-        ...     "use_instance_head": True,
+        ...     "use_ins_head": True,
         ...     "emb_dim": 16
         ... }
         >>> loss_config = {
@@ -72,7 +72,7 @@ class InstanceSegmentationModule(pl.LightningModule):
         self.loss_config = loss_config
         
         # Ensure instance head is enabled
-        model_config.setdefault("use_instance_head", True)
+        model_config.setdefault("use_ins_head", True)
         model_config.setdefault("out_channels", 2)  # fg/bg
         
         # Initialize model

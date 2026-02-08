@@ -1,0 +1,231 @@
+# =============================================================================
+# SNEMI3D Vista3D Configuration
+# =============================================================================
+# Training Vista3D model for neuron segmentation in electron microscopy images.
+#
+# Supports:
+#   - Automatic segmentation mode (training.mode: auto)
+#   - Interactive segmentation mode (training.mode: interactive)
+#   - Mixed training with both modes (training.mode: mixed)
+#
+# Usage:
+#   python scripts/train_vista3d.py --config configs/snemi3d_vista3d.yaml
+#   python scripts/train_vista3d.py --config configs/snemi3d_vista3d.yaml training.mode=interactive
+# =============================================================================
+
+# Experiment settings
+experiment_name: snemi3d_vista3d
+project_name: neurocircuitry-vista3d
+seed: 42
+logger: tensorboard
+log_dir: logs
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+# SNEMI3D data dimensions: [Z, Y, X] = [100, 1024, 1024]
+# - Z: 100 slices (depth through tissue, ~30nm/slice)
+# - Y: 1024 pixels (height, 6nm/pixel)
+# - X: 1024 pixels (width, 6nm/pixel)
+# =============================================================================
+data:
+  dataset: snemi3d
+  data_root: data/SNEMI3D
+  
+  # 3D patch size for training [Z, Y, X] - random crops from full volume
+  # Using [64, 256, 256] to maintain square XY slices for visualization
+  patch_size: [64, 256, 256]
+  
+  # Batch size (reduce if OOM, increase for faster training)
+  batch_size: 8
+  
+  # Data loading
+  num_workers: 4
+  cache_rate: 1.0  # Cache full volumes in memory
+  
+  # Number of random crops per epoch
+  num_train_samples: 800  # Random crops for training per epoch
+  num_val_samples: 200     # Random crops for validation per epoch
+  
+  # Train/validation split ratio
+  train_val_split: 0.2
+  
+  # Data augmentation
+  augmentation: true
+  
+  # Semantic class configuration
+  # Defines mapping from instance IDs to semantic classes
+  semantic_classes:
+    # Class names in order (index = class_id)
+    # class 0 = background, class 1 = neuron, etc.
+    names: ["background", "neuron"]
+    
+    # Instance ID mapping: class_name -> list of instance IDs
+    # For SNEMI3D: all foreground (label > 0) is neuron, so no explicit mapping needed
+    # For multi-class datasets like CREMI, specify which instance IDs belong to each class:
+    #   instance_ids:
+    #     neuron: [1, 2, 3, 10, 23, 45, ...]  # Neuron instance IDs in full volume
+    #     mito: [4, 5, 8, 9, 12, ...]         # Mitochondria instance IDs
+    #     cleft: [100, 101, 102, ...]         # Synaptic cleft instance IDs
+    instance_ids: null  # null = default binary (all foreground = class 1)
+    
+    # Default class for unmapped foreground instances
+    default_class: 1
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  # Architecture
+  encoder_name: segresnet  # 'segresnet' or 'swin'
+  feature_size: 48
+  
+  # Input/Output
+  in_channels: 1
+  # num_classes should match data.semantic_classes.num_classes
+  num_classes: 2  # 0=background, 1=neuron (see data.semantic_classes)
+  
+  # Semantic and Instance heads (following ariel architecture)
+  sem_head: 16  # Semantic embedding dimension
+  ins_head: 16  # Instance embedding dimension
+  use_sem_head: true  # Enable semantic head (conv layers after base model)
+  use_ins_head: true  # Enable instance embedding for discriminative loss
+  
+  # Pretrained weights
+  pretrained: false  # Set true to load MONAI Vista3D weights
+  freeze_encoder: false  # Freeze encoder for fine-tuning
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  # Training mode:
+  #   - 'auto': Automatic segmentation (standard training)
+  #   - 'interactive': Point-prompt based training
+  #   - 'mixed': Alternate between auto and interactive
+  mode: auto
+  
+  # Number of point prompts for interactive/mixed mode
+  num_point_prompts: 5
+  
+  # Training schedule
+  max_epochs: 200
+  
+  # Hardware
+  # Use CUDA_VISIBLE_DEVICES to select a free GPU:
+  #   CUDA_VISIBLE_DEVICES=5 python scripts/train_vista3d.py --config configs/snemi3d_vista3d.yaml
+  accelerator: gpu
+  devices: 1  # Use 1 GPU (selected by CUDA_VISIBLE_DEVICES)
+  strategy: auto  # Will use SingleDeviceStrategy for 1 GPU
+  
+  # Mixed precision for memory efficiency
+  precision: 16-mixed
+  
+  # Gradient settings
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  
+  # Validation
+  val_check_interval: 1.0
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  
+  # Logging
+  log_every_n_steps: 10
+  
+  # Performance
+  benchmark: true
+  deterministic: false
+  
+  # Development
+  fast_dev_run: false
+
+# =============================================================================
+# Optimizer Configuration
+# =============================================================================
+optimizer:
+  type: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+  
+  scheduler:
+    type: cosine
+    T_max: 200
+    eta_min: 1.0e-7
+
+# =============================================================================
+# Loss Configuration
+# =============================================================================
+loss:
+  # Semantic segmentation loss weights
+  ce_weight: 0.5
+  dice_weight: 0.5
+  boundary_weight: 0.1  # Optional boundary-aware loss
+  
+  # Instance segmentation loss weight (discriminative loss)
+  disc_weight: 1.0
+  
+  # Discriminative loss configuration (for instance embeddings)
+  # Based on "Semantic Instance Segmentation with a Discriminative Loss Function"
+  discriminative:
+    delta_var: 0.5    # Margin for variance term (pull same instance together)
+    delta_dist: 1.5   # Margin for distance term (push different instances apart)
+    norm: 2           # L2 norm
+    alpha: 1.0        # Weight for variance term
+    beta: 1.0         # Weight for distance term
+    gamma: 0.001      # Weight for regularization term
+  
+  # Class weights for imbalanced data (background, foreground)
+  class_weights: [0.3, 0.7]
+  
+  # Ignore index for unlabeled regions
+  ignore_index: -100
+
+# =============================================================================
+# Callbacks Configuration
+# =============================================================================
+callbacks:
+  checkpoint:
+    enabled: true
+    # Checkpoint directory is relative to log_dir/{experiment_name}/
+    dirpath: null  # Will be set to {log_dir}/{experiment_name}/checkpoints
+    # Can monitor val/dice (semantic), val/ari, or val/ami (instance metrics)
+    filename: "vista3d-{epoch:02d}-{val/dice:.4f}-{val/ari:.4f}"
+    save_top_k: 3
+    monitor: val/dice  # Can also use val/ari for instance segmentation
+    mode: max
+    save_last: true
+  
+  early_stopping:
+    enabled: true
+    monitor: val/dice  # Can also use val/ari for instance segmentation
+    patience: 50
+    mode: max
+  
+  tensorboard_volume:
+    enabled: true
+    log_every_n_epochs: 1  # Log volume slices every N epochs
+    num_slices: 8          # Number of slices per axis
+    # For tensor [Z, Y, X] = [D, H, W]:
+    # - "axial": slice through Z, view Y-X plane (typical EM microscope view)
+    # - "coronal": slice through Y, view Z-X plane
+    # - "sagittal": slice through X, view Z-Y plane
+    # With patch_size [32, 128, 128], axial gives square [128, 128] slices
+    slice_axes: ["axial"]  # Only YX plane (typical EM view)
+    max_samples: 2         # Max samples to visualize per batch
+    log_train: true        # Log training samples
+    log_val: true          # Log validation samples
+    log_embeddings: true   # Log instance embeddings as PCA projection to RGB
+    log_instances: true    # Log clustered instance segmentation
+    clustering_bandwidth: 0.5  # Bandwidth for mean-shift clustering
+
+# =============================================================================
+# Inference Configuration (for scripts/infer_vista3d.py)
+# =============================================================================
+inference:
+  # Sliding window settings [Z, Y, X]
+  patch_size: [64, 256, 256]
+  stride: [32, 128, 128]  # 50% overlap
+  aggregation: gaussian  # 'gaussian', 'average', 'max'
+  batch_size: 4

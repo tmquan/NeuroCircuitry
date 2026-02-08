@@ -96,6 +96,9 @@ class DiscriminativeLoss(nn.Module):
         unique_instances: torch.Tensor,
     ) -> torch.Tensor:
         """Compute cluster centers for each instance."""
+        # Ensure float32
+        emb = emb.float()
+        
         centers = []
         
         for inst_id in unique_instances:
@@ -108,7 +111,7 @@ class DiscriminativeLoss(nn.Module):
             centers.append(center)
         
         if len(centers) == 0:
-            return torch.zeros((0, emb.shape[0]), device=emb.device)
+            return torch.zeros((0, emb.shape[0]), device=emb.device, dtype=torch.float32)
         
         return torch.stack(centers)
     
@@ -123,9 +126,13 @@ class DiscriminativeLoss(nn.Module):
         num_instances = len(unique_instances)
         
         if num_instances == 0:
-            return torch.tensor(0.0, device=emb.device)
+            return torch.tensor(0.0, device=emb.device, dtype=torch.float32)
         
-        loss_var = torch.tensor(0.0, device=emb.device)
+        # Ensure float32
+        emb = emb.float()
+        cluster_centers = cluster_centers.float()
+        
+        loss_var = torch.tensor(0.0, device=emb.device, dtype=torch.float32)
         
         for idx, inst_id in enumerate(unique_instances):
             inst_mask = inst == inst_id
@@ -147,9 +154,12 @@ class DiscriminativeLoss(nn.Module):
         num_instances = cluster_centers.shape[0]
         
         if num_instances <= 1:
-            return torch.tensor(0.0, device=cluster_centers.device)
+            return torch.tensor(0.0, device=cluster_centers.device, dtype=torch.float32)
         
-        loss_dist = torch.tensor(0.0, device=cluster_centers.device)
+        # Ensure float32
+        cluster_centers = cluster_centers.float()
+        
+        loss_dist = torch.tensor(0.0, device=cluster_centers.device, dtype=torch.float32)
         n_pairs = 0
         
         for i in range(num_instances):
@@ -167,7 +177,10 @@ class DiscriminativeLoss(nn.Module):
     def _regularization_loss(self, cluster_centers: torch.Tensor) -> torch.Tensor:
         """Compute regularization loss: keep centers near origin."""
         if cluster_centers.shape[0] == 0:
-            return torch.tensor(0.0, device=cluster_centers.device)
+            return torch.tensor(0.0, device=cluster_centers.device, dtype=torch.float32)
+        
+        # Ensure float32
+        cluster_centers = cluster_centers.float()
         
         norms = torch.norm(cluster_centers, p=self.norm, dim=1)
         return norms.mean()
@@ -193,9 +206,10 @@ class DiscriminativeLoss(nn.Module):
         
         emb_flat, mask_flat, _ = self._flatten_spatial(embedding, instance_mask)
         
-        loss_var_total = torch.tensor(0.0, device=embedding.device)
-        loss_dist_total = torch.tensor(0.0, device=embedding.device)
-        loss_reg_total = torch.tensor(0.0, device=embedding.device)
+        # Ensure float32 for loss accumulation
+        loss_var_total = torch.tensor(0.0, device=embedding.device, dtype=torch.float32)
+        loss_dist_total = torch.tensor(0.0, device=embedding.device, dtype=torch.float32)
+        loss_reg_total = torch.tensor(0.0, device=embedding.device, dtype=torch.float32)
         
         valid_batches = 0
         
@@ -263,6 +277,9 @@ class DiscriminativeLossVectorized(DiscriminativeLoss):
         num_instances = len(unique_instances)
         emb_dim = emb.shape[0]
         
+        # Ensure emb is a regular tensor with consistent dtype
+        emb = emb.float()
+        
         max_inst = int(inst.max().item()) + 1
         inst_to_idx = torch.full((max_inst,), -1, device=emb.device, dtype=torch.long)
         
@@ -273,18 +290,19 @@ class DiscriminativeLossVectorized(DiscriminativeLoss):
         valid_mask = cluster_indices >= 0
         
         if not valid_mask.any():
-            return torch.zeros((num_instances, emb_dim), device=emb.device)
+            return torch.zeros((num_instances, emb_dim), device=emb.device, dtype=emb.dtype)
         
         valid_emb = emb[:, valid_mask]
         valid_idx = cluster_indices[valid_mask]
         
-        cluster_sums = torch.zeros((num_instances, emb_dim), device=emb.device)
-        cluster_counts = torch.zeros(num_instances, device=emb.device)
+        # Create cluster_sums with same dtype as emb
+        cluster_sums = torch.zeros((num_instances, emb_dim), device=emb.device, dtype=emb.dtype)
+        cluster_counts = torch.zeros(num_instances, device=emb.device, dtype=emb.dtype)
         
         valid_emb_t = rearrange(valid_emb, "e n -> n e")
         for e in range(emb_dim):
             cluster_sums[:, e].scatter_add_(0, valid_idx, valid_emb_t[:, e])
-        cluster_counts.scatter_add_(0, valid_idx, torch.ones_like(valid_idx, dtype=torch.float))
+        cluster_counts.scatter_add_(0, valid_idx, torch.ones(valid_idx.shape[0], device=emb.device, dtype=emb.dtype))
         
         cluster_counts = torch.clamp(cluster_counts, min=1)
         cluster_means = cluster_sums / rearrange(cluster_counts, "c -> c 1")
@@ -302,7 +320,11 @@ class DiscriminativeLossVectorized(DiscriminativeLoss):
         num_instances = len(unique_instances)
         
         if num_instances == 0:
-            return torch.tensor(0.0, device=emb.device)
+            return torch.tensor(0.0, device=emb.device, dtype=torch.float32)
+        
+        # Ensure consistent dtype
+        emb = emb.float()
+        cluster_means = cluster_means.float()
         
         max_inst = int(inst.max().item()) + 1
         inst_to_idx = torch.full((max_inst,), -1, device=emb.device, dtype=torch.long)
@@ -314,7 +336,7 @@ class DiscriminativeLossVectorized(DiscriminativeLoss):
         valid_mask = cluster_indices >= 0
         
         if not valid_mask.any():
-            return torch.tensor(0.0, device=emb.device)
+            return torch.tensor(0.0, device=emb.device, dtype=torch.float32)
         
         valid_emb = emb[:, valid_mask]
         valid_idx = cluster_indices[valid_mask]
@@ -327,11 +349,12 @@ class DiscriminativeLossVectorized(DiscriminativeLoss):
         
         hinged = F.relu(distances - self.delta_var) ** 2
         
-        cluster_losses = torch.zeros(num_instances, device=emb.device)
-        cluster_counts = torch.zeros(num_instances, device=emb.device)
+        # Create tensors with consistent dtype
+        cluster_losses = torch.zeros(num_instances, device=emb.device, dtype=torch.float32)
+        cluster_counts = torch.zeros(num_instances, device=emb.device, dtype=torch.float32)
         
-        cluster_losses.scatter_add_(0, valid_idx, hinged)
-        cluster_counts.scatter_add_(0, valid_idx, torch.ones_like(hinged))
+        cluster_losses.scatter_add_(0, valid_idx, hinged.float())
+        cluster_counts.scatter_add_(0, valid_idx, torch.ones_like(hinged, dtype=torch.float32))
         
         cluster_counts = torch.clamp(cluster_counts, min=1)
         per_cluster_loss = cluster_losses / cluster_counts
@@ -344,7 +367,10 @@ class DiscriminativeLossVectorized(DiscriminativeLoss):
         num_instances = cluster_means.shape[0]
         
         if num_instances <= 1:
-            return torch.tensor(0.0, device=cluster_means.device)
+            return torch.tensor(0.0, device=cluster_means.device, dtype=torch.float32)
+        
+        # Ensure float32
+        cluster_means = cluster_means.float()
         
         means_i = rearrange(cluster_means, "c e -> c 1 e")
         means_j = rearrange(cluster_means, "c e -> 1 c e")

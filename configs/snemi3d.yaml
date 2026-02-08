@@ -27,7 +27,8 @@ model:
   feature_dim: 64
   emb_dim: 16
   dropout: 0.2
-  use_instance_head: true  # Enable for instance segmentation
+  use_sem_head: true  # Enable semantic head
+  use_ins_head: true  # Enable for instance segmentation
 
 # Optimizer tuned for SNEMI3D
 optimizer:

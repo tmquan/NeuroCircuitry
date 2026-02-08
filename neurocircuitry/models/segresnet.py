@@ -30,7 +30,7 @@ class SegResNetWrapper(BaseModel):
         dropout: Dropout probability (default: 0.2).
         blocks_down: Encoder block depths (default: (1, 2, 2, 4)).
         blocks_up: Decoder block depths (default: (1, 1, 1)).
-        use_instance_head: Include instance embedding head (default: False).
+        use_ins_head: Include instance embedding head (default: False).
         use_boundary_head: Include boundary prediction head (default: False).
     
     Example:
@@ -48,7 +48,7 @@ class SegResNetWrapper(BaseModel):
         >>> model = SegResNetWrapper(
         ...     in_channels=1,
         ...     out_channels=2,
-        ...     use_instance_head=True,
+        ...     use_ins_head=True,
         ...     emb_dim=16
         ... )
         >>> output = model(x)
@@ -66,7 +66,7 @@ class SegResNetWrapper(BaseModel):
         dropout: float = 0.2,
         blocks_down: Tuple[int, ...] = (1, 2, 2, 4),
         blocks_up: Tuple[int, ...] = (1, 1, 1),
-        use_instance_head: bool = False,
+        use_ins_head: bool = False,
         use_boundary_head: bool = False,
     ):
         super().__init__(
@@ -78,7 +78,7 @@ class SegResNetWrapper(BaseModel):
         self.init_filters = init_filters
         self.feature_dim = feature_dim
         self.emb_dim = emb_dim
-        self.use_instance_head = use_instance_head
+        self.use_ins_head = use_ins_head
         self.use_boundary_head = use_boundary_head
         
         # Import MONAI SegResNet
@@ -107,7 +107,7 @@ class SegResNetWrapper(BaseModel):
         )
         
         # Optional instance embedding head
-        if use_instance_head:
+        if use_ins_head:
             self.instance_head = nn.Sequential(
                 conv_class(feature_dim, feature_dim, kernel_size=3, padding=1),
                 bn_class(feature_dim),
@@ -135,7 +135,7 @@ class SegResNetWrapper(BaseModel):
             Dictionary with:
                 - 'features': Backbone features
                 - 'logits': Semantic segmentation logits
-                - 'embedding': Instance embeddings (if use_instance_head)
+                - 'embedding': Instance embeddings (if use_ins_head)
                 - 'boundary': Boundary predictions (if use_boundary_head)
         """
         # Backbone features
@@ -146,7 +146,7 @@ class SegResNetWrapper(BaseModel):
             "logits": self.semantic_head(features),
         }
         
-        if self.use_instance_head:
+        if self.use_ins_head:
             outputs["embedding"] = self.instance_head(features)
         
         if self.use_boundary_head:

@@ -34,7 +34,8 @@ model:
   feature_dim: 64
   emb_dim: 16
   dropout: 0.2
-  use_instance_head: true
+  use_sem_head: true
+  use_ins_head: true
 
 # Optimizer
 optimizer:

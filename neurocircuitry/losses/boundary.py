@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, repeat
 
 
 class BoundaryLoss(nn.Module):
@@ -53,8 +53,8 @@ class BoundaryLoss(nn.Module):
         Returns:
             Boundary mask [B, H, W] with 1 at boundaries.
         """
-        # Add channel dimension for conv
-        labels_float = labels.float().unsqueeze(1)
+        # Add channel dimension for conv: [B, H, W] -> [B, 1, H, W]
+        labels_float = rearrange(labels.float(), "b h w -> b 1 h w")
         
         # Erosion: min pooling
         eroded = -F.max_pool2d(
@@ -72,8 +72,8 @@ class BoundaryLoss(nn.Module):
             padding=self.kernel_size // 2,
         )
         
-        # Boundary = dilated - eroded
-        boundary = (dilated != eroded).float().squeeze(1)
+        # Boundary = dilated - eroded, remove channel dim: [B, 1, H, W] -> [B, H, W]
+        boundary = rearrange((dilated != eroded).float(), "b 1 h w -> b h w")
         
         return boundary
     
@@ -151,8 +151,8 @@ class BoundaryAwareCrossEntropy(nn.Module):
         Returns:
             Weight map [B, H, W].
         """
-        # Convert to float
-        labels_float = labels.float().unsqueeze(1)
+        # Convert to float and add channel dim: [B, H, W] -> [B, 1, H, W]
+        labels_float = rearrange(labels.float(), "b h w -> b 1 h w")
         
         # Sobel gradients
         sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], 
@@ -160,15 +160,16 @@ class BoundaryAwareCrossEntropy(nn.Module):
         sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], 
                                dtype=torch.float32, device=labels.device)
         
-        sobel_x = sobel_x.view(1, 1, 3, 3)
-        sobel_y = sobel_y.view(1, 1, 3, 3)
+        # Reshape to conv kernel: [3, 3] -> [1, 1, 3, 3]
+        sobel_x = rearrange(sobel_x, "h w -> 1 1 h w")
+        sobel_y = rearrange(sobel_y, "h w -> 1 1 h w")
         
         grad_x = F.conv2d(labels_float, sobel_x, padding=1)
         grad_y = F.conv2d(labels_float, sobel_y, padding=1)
         
-        # Gradient magnitude (boundary strength)
+        # Gradient magnitude (boundary strength), remove channel dim: [B, 1, H, W] -> [B, H, W]
         grad_mag = torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-8)
-        grad_mag = grad_mag.squeeze(1)
+        grad_mag = rearrange(grad_mag, "b 1 h w -> b h w")
         
         # Normalize and apply Gaussian weighting
         grad_mag = grad_mag / (grad_mag.max() + 1e-8)

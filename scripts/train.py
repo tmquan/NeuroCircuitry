@@ -132,7 +132,7 @@ def get_module(cfg: DictConfig) -> pl.LightningModule:
     loss_cfg = dict(cfg.get("loss", {}))
     
     # Determine module type based on model config
-    use_instance = model_cfg.pop("use_instance_head", False)
+    use_instance = model_cfg.pop("use_ins_head", False)
     use_affinity = model_cfg.pop("use_affinity", False)
     
     if use_affinity:
@@ -142,7 +142,7 @@ def get_module(cfg: DictConfig) -> pl.LightningModule:
             loss_config=loss_cfg,
         )
     elif use_instance:
-        model_cfg["use_instance_head"] = True
+        model_cfg["use_ins_head"] = True
         return InstanceSegmentationModule(
             model_config=model_cfg,
             optimizer_config=optimizer_cfg,
