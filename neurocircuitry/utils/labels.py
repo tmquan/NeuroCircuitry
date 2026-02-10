@@ -306,24 +306,17 @@ def cluster_embeddings_meanshift(
     foreground_mask: Optional[torch.Tensor] = None,
     bandwidth: float = 0.5,
     min_cluster_size: int = 50,
-    n_iter: int = 10,
-    use_gpu: bool = True,
-    max_points_gpu: int = 20000,
 ) -> torch.Tensor:
     """
-    Cluster pixel embeddings using mean-shift clustering.
+    Cluster pixel embeddings using mean-shift clustering (sklearn CPU implementation).
     
-    Uses gpushift for fast GPU-accelerated mean-shift when available,
-    falls back to sklearn's CPU implementation otherwise.
+    WARNING: This is slow for large volumes. Only use for evaluation, not during training.
     
     Args:
         embedding: Pixel embeddings [E, D, H, W] or [E, H, W].
         foreground_mask: Binary mask, same spatial shape as embedding.
         bandwidth: Mean-shift bandwidth (related to delta_var).
         min_cluster_size: Minimum pixels per cluster.
-        n_iter: Number of mean-shift iterations (gpushift only).
-        use_gpu: Whether to use GPU-accelerated gpushift.
-        max_points_gpu: Max foreground points for GPU clustering (avoids OOM).
     
     Returns:
         Instance labels with same spatial shape as embedding.
@@ -352,20 +345,12 @@ def cluster_embeddings_meanshift(
         return torch.zeros(spatial_shape, device=device, dtype=torch.long)
     
     emb_fg = emb_flat[fg_indices]  # [N_fg, E]
-    N_fg = emb_fg.shape[0]
     
-    # Choose clustering method based on number of points
-    # GPU clustering has O(N^2) memory for distance matrix, so limit points
-    if use_gpu and device.type == "cuda" and N_fg <= max_points_gpu:
-        labels_fg = _cluster_with_gpushift(
-            emb_fg, bandwidth, n_iter, min_cluster_size
-        )
-    else:
-        # For large point clouds, use sklearn (more memory efficient)
-        labels_fg = _cluster_with_sklearn(
-            emb_fg.cpu().numpy(), bandwidth, min_cluster_size
-        )
-        labels_fg = torch.from_numpy(labels_fg).to(device=device, dtype=torch.long)
+    # Use sklearn MeanShift (CPU)
+    labels_fg = _cluster_with_sklearn(
+        emb_fg.cpu().numpy(), bandwidth, min_cluster_size
+    )
+    labels_fg = torch.from_numpy(labels_fg).to(device=device, dtype=torch.long)
     
     # Create full label map
     labels_full = torch.zeros(emb_flat.shape[0], device=device, dtype=torch.long)
@@ -374,150 +359,6 @@ def cluster_embeddings_meanshift(
     labels_out = labels_full.reshape(spatial_shape)
     
     return labels_out
-
-
-def _cluster_with_gpushift(
-    emb_fg: torch.Tensor,
-    bandwidth: float,
-    n_iter: int,
-    min_cluster_size: int,
-) -> torch.Tensor:
-    """
-    Cluster embeddings using GPU-accelerated gpushift.
-    
-    Args:
-        emb_fg: Foreground embeddings [N, E] on CUDA.
-        bandwidth: Mean-shift bandwidth.
-        n_iter: Number of iterations.
-        min_cluster_size: Minimum cluster size.
-    
-    Returns:
-        Cluster labels [N] starting from 1 (0 = filtered out).
-    """
-    try:
-        import gpushift
-    except ImportError:
-        # Fall back to sklearn if gpushift not available
-        return torch.from_numpy(
-            _cluster_with_sklearn(emb_fg.cpu().numpy(), bandwidth, min_cluster_size)
-        ).to(device=emb_fg.device, dtype=torch.long)
-    
-    device = emb_fg.device
-    N, E = emb_fg.shape
-    
-    # gpushift expects [B, N, E] format
-    points = emb_fg.unsqueeze(0).contiguous().float()  # [1, N, E]
-    
-    # Use native PyTorch mode by default (keops has compatibility issues with PyTorch 2.10+)
-    # For very large N, try keops first as it's more memory efficient
-    use_keops_options = [False]  # Default to native PyTorch
-    
-    for use_keops in use_keops_options:
-        try:
-            # Create mean-shift clusterer
-            mean_shift = gpushift.MeanShift(
-                n_iter=n_iter,
-                kernel=gpushift.MeanShiftStep.GAUSSIAN_KERNEL,
-                bandwidth=bandwidth,
-                blurring=False,
-                use_keops=use_keops,
-            )
-            
-            # Run mean-shift to get converged points
-            with torch.no_grad():
-                shifted = mean_shift(points)  # [1, N, E]
-            
-            shifted = shifted.squeeze(0)  # [N, E]
-            
-            # Cluster converged points by finding unique modes
-            # Points that converged to the same location belong to the same cluster
-            labels_fg = _assign_cluster_labels(shifted, bandwidth * 0.5, min_cluster_size)
-            
-            return labels_fg
-        
-        except (RuntimeError, AttributeError, Exception) as e:
-            if not use_keops:
-                # Both keops and native failed, fall back to sklearn
-                import warnings
-                warnings.warn(
-                    f"gpushift failed ({type(e).__name__}: {e}), falling back to sklearn MeanShift",
-                    RuntimeWarning
-                )
-                break
-            # Try native PyTorch mode next
-            continue
-    
-    # Final fallback to sklearn
-    return torch.from_numpy(
-        _cluster_with_sklearn(emb_fg.cpu().numpy(), bandwidth, min_cluster_size)
-    ).to(device=device, dtype=torch.long)
-
-
-def _assign_cluster_labels(
-    shifted: torch.Tensor,
-    merge_threshold: float,
-    min_cluster_size: int,
-) -> torch.Tensor:
-    """
-    Assign cluster labels based on converged mean-shift points.
-    
-    Points that are within merge_threshold distance are assigned the same label.
-    Uses a hash-based quantization approach for memory efficiency.
-    
-    Args:
-        shifted: Converged points [N, E].
-        merge_threshold: Distance threshold for merging points into same cluster.
-        min_cluster_size: Minimum pixels per cluster.
-    
-    Returns:
-        Cluster labels [N] starting from 1 (0 = filtered out).
-    """
-    device = shifted.device
-    N = shifted.shape[0]
-    E = shifted.shape[1]
-    
-    # Discretize shifted points to grid cells
-    # Points that converge to same cell get same label
-    grid_size = merge_threshold
-    quantized = torch.round(shifted / grid_size)
-    
-    # Hash quantized coordinates to get cluster IDs
-    # Use a simple polynomial hash with large primes
-    primes = torch.tensor(
-        [73856093, 19349663, 83492791, 29475827, 39916801, 
-         49979687, 67867979, 86028121, 15485863, 32452843,
-         49979693, 67867967, 86028157, 15485867, 32452867,
-         49979687],  # Extended for higher E
-        device=device, dtype=torch.long
-    )[:E]
-    
-    hashes = (quantized.long() * primes.unsqueeze(0)).sum(dim=1)
-    
-    # Map hashes to sequential labels
-    unique_hashes, inverse = torch.unique(hashes, return_inverse=True)
-    labels = inverse + 1  # +1 to reserve 0 for background
-    
-    # Filter small clusters
-    unique_labels, counts = torch.unique(labels, return_counts=True)
-    for label, count in zip(unique_labels, counts):
-        if label > 0 and count < min_cluster_size:
-            labels[labels == label] = 0
-    
-    # Relabel sequentially
-    unique_labels = torch.unique(labels)
-    unique_labels = unique_labels[unique_labels > 0]
-    
-    if len(unique_labels) == 0:
-        return labels
-    
-    # Create mapping
-    label_map = torch.zeros(int(labels.max().item()) + 1, device=device, dtype=torch.long)
-    for new_idx, old_label in enumerate(unique_labels):
-        label_map[old_label] = new_idx + 1
-    
-    labels = label_map[labels]
-    
-    return labels
 
 
 def _cluster_with_sklearn(

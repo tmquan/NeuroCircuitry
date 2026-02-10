@@ -55,23 +55,24 @@ class CreateClassIds:
     """
     
     # CREMI ID offsets (must match CREMI3DDataset)
-    CLEFT_ID_OFFSET = 100000
-    MITO_ID_OFFSET = 200000
+    # CREMI neuron IDs can be up to ~750000, so offsets must be larger
+    ID_OFFSET_CLEFT = 1000000   # 1M offset
+    ID_OFFSET_MITO = 2000000    # 2M offset
     
     def __init__(
         self,
         dataset: Dataset,
-        dataset_type: str = "snemi3d",
+        dataset_dtype: str = "snemi3d",
         default_class: int = 1,
     ):
         """
         Args:
             dataset: Base dataset to wrap.
-            dataset_type: 'snemi3d' or 'cremi3d'.
+            dataset_dtype: 'snemi3d' or 'cremi3d'.
             default_class: Default class for foreground.
         """
         self.dataset = dataset
-        self.dataset_type = dataset_type
+        self.dataset_dtype = dataset_dtype
         self.default_class = default_class
     
     def __len__(self):
@@ -90,25 +91,25 @@ class CreateClassIds:
             label_np = np.asarray(label)
         
         # Create class_ids based on dataset type
-        if self.dataset_type == "snemi3d":
+        if self.dataset_dtype == "snemi3d":
             # SNEMI3D: all foreground is neuron (class 1)
             class_ids = np.zeros_like(label_np, dtype=np.int64)
             class_ids[label_np > 0] = 1
             
-        elif self.dataset_type == "cremi3d":
+        elif self.dataset_dtype == "cremi3d":
             # CREMI3D: map based on ID ranges
             class_ids = np.zeros_like(label_np, dtype=np.int64)
             
-            # Neurons: IDs 1 to CLEFT_ID_OFFSET-1
-            neuron_mask = (label_np > 0) & (label_np < self.CLEFT_ID_OFFSET)
+            # Neurons: IDs 1 to ID_OFFSET_CLEFT-1
+            neuron_mask = (label_np > 0) & (label_np < self.ID_OFFSET_CLEFT)
             class_ids[neuron_mask] = 1
             
-            # Clefts: IDs CLEFT_ID_OFFSET to MITO_ID_OFFSET-1
-            cleft_mask = (label_np >= self.CLEFT_ID_OFFSET) & (label_np < self.MITO_ID_OFFSET)
+            # Clefts: IDs ID_OFFSET_CLEFT to ID_OFFSET_-1
+            cleft_mask = (label_np >= self.ID_OFFSET_CLEFT) & (label_np < self.ID_OFFSET_)
             class_ids[cleft_mask] = 2
             
-            # Mito: IDs >= MITO_ID_OFFSET
-            mito_mask = label_np >= self.MITO_ID_OFFSET
+            # Mito: IDs >= ID_OFFSET_
+            mito_mask = label_np >= self.ID_OFFSET_
             class_ids[mito_mask] = 3
             
         else:
@@ -119,7 +120,7 @@ class CreateClassIds:
         # Add class_ids to sample
         sample = dict(sample)  # Make a copy
         sample["class_ids"] = torch.from_numpy(class_ids) if isinstance(label, torch.Tensor) else class_ids
-        sample["dataset_type"] = self.dataset_type
+        sample["dataset_dtype"] = self.dataset_dtype
         
         return sample
 
@@ -218,7 +219,7 @@ class MultiDatasetDataModule(pl.LightningDataModule):
                 # Wrap with class_ids creator
                 wrapped_train = CreateClassIds(
                     self.snemi3d_dm.train_dataset,
-                    dataset_type="snemi3d",
+                    dataset_dtype="snemi3d",
                 )
                 # Expand dataset to create more samples per epoch
                 expanded_train = ExpandedDataset(wrapped_train, self.train_expansion_factor)
@@ -228,7 +229,7 @@ class MultiDatasetDataModule(pl.LightningDataModule):
             if self.snemi3d_dm.val_dataset is not None:
                 wrapped_val = CreateClassIds(
                     self.snemi3d_dm.val_dataset,
-                    dataset_type="snemi3d",
+                    dataset_dtype="snemi3d",
                 )
                 expanded_val = ExpandedDataset(wrapped_val, self.val_expansion_factor)
                 val_datasets.append(expanded_val)
@@ -240,7 +241,7 @@ class MultiDatasetDataModule(pl.LightningDataModule):
             if self.cremi3d_dm.train_dataset is not None:
                 wrapped_train = CreateClassIds(
                     self.cremi3d_dm.train_dataset,
-                    dataset_type="cremi3d",
+                    dataset_dtype="cremi3d",
                 )
                 expanded_train = ExpandedDataset(wrapped_train, self.train_expansion_factor)
                 train_datasets.append(expanded_train)
@@ -249,7 +250,7 @@ class MultiDatasetDataModule(pl.LightningDataModule):
             if self.cremi3d_dm.val_dataset is not None:
                 wrapped_val = CreateClassIds(
                     self.cremi3d_dm.val_dataset,
-                    dataset_type="cremi3d",
+                    dataset_dtype="cremi3d",
                 )
                 expanded_val = ExpandedDataset(wrapped_val, self.val_expansion_factor)
                 val_datasets.append(expanded_val)

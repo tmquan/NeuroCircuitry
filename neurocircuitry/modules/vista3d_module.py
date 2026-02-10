@@ -449,7 +449,7 @@ class Vista3DModule(pl.LightningModule):
         if compute_instance_metrics and self.use_ins_head and embeds is not None and instance_labels is not None:
             from neurocircuitry.utils.labels import (
                 compute_ari_ami,
-                cluster_embedss_meanshift,
+                cluster_embeddings_meanshift,
             )
             
             # Get bandwidth from discriminative loss config
@@ -462,7 +462,7 @@ class Vista3DModule(pl.LightningModule):
             gt_labels = instance_labels[0]  # [D, H, W]
             
             # Cluster embedss to get predicted instances
-            pred_instances = cluster_embedss_meanshift(
+            pred_instances = cluster_embeddings_meanshift(
                 emb_first,
                 foreground_mask=fg_mask,
                 bandwidth=bandwidth,
@@ -627,8 +627,10 @@ class Vista3DModule(pl.LightningModule):
             instance_labels=instance_labels,
         )
         
-        # Compute metrics (including ARI/AMI on first batch only - expensive)
-        compute_instance = (batch_idx == 0) and self.use_ins_head
+        # Compute metrics (ARI/AMI is VERY expensive - disabled by default)
+        # MeanShift clustering can take hours for large volumes
+        # Set compute_instance_metrics=True in config to enable (not recommended during training)
+        compute_instance = False  # Disabled - too slow for training
         metrics = self._compute_metrics(
             logits, semantic_labels,
             embeds=embeds,

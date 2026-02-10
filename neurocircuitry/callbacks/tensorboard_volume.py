@@ -222,10 +222,52 @@ class TensorBoardVolumeCallback(Callback):
             RGB image [3, H, W].
         """
         if is_instance:
-            # Use many distinct colors for instances
-            colors = self._get_instance_colors(64).to(image.device)
-            labels = image.long() % len(colors)
-            rgb = colors[labels]
+            # Generate unique color per instance ID using hash-based approach
+            # This avoids color collisions from modulo operation
+            labels = image.long()
+            H, W = labels.shape
+            
+            # Background (0) is black
+            rgb = torch.zeros(H, W, 3, device=image.device, dtype=torch.float32)
+            
+            # Get unique non-zero labels
+            unique_labels = torch.unique(labels)
+            unique_labels = unique_labels[unique_labels > 0]
+            
+            # Generate color for each unique instance using hash
+            for i, label_id in enumerate(unique_labels):
+                # Use golden ratio hash for each instance ID
+                hash_val = (label_id.item() * 0.618033988749895) % 1.0
+                
+                # Generate HSV color with good saturation and value
+                hue = hash_val
+                sat = 0.7 + (label_id.item() % 3) * 0.1
+                val = 0.8 + (label_id.item() % 4) * 0.05
+                
+                # HSV to RGB
+                c = val * sat
+                x = c * (1 - abs((hue * 6) % 2 - 1))
+                m = val - c
+                
+                if hue < 1/6:
+                    r, g, b = c + m, x + m, m
+                elif hue < 2/6:
+                    r, g, b = x + m, c + m, m
+                elif hue < 3/6:
+                    r, g, b = m, c + m, x + m
+                elif hue < 4/6:
+                    r, g, b = m, x + m, c + m
+                elif hue < 5/6:
+                    r, g, b = x + m, m, c + m
+                else:
+                    r, g, b = c + m, m, x + m
+                
+                # Apply color to all pixels with this label
+                mask = labels == label_id
+                rgb[mask, 0] = r
+                rgb[mask, 1] = g
+                rgb[mask, 2] = b
+            
             return rearrange(rgb, "h w c -> c h w")
         
         elif is_label:

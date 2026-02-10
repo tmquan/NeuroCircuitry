@@ -41,8 +41,9 @@ data:
       enabled: true
       data_root: data/CREMI3D
       weight: 1.0
-      # CREMI volumes to use (only A available currently)
-      volumes: ["A"]
+      # CREMI volumes for training/validation: A, B, C (have labels)
+      # Test volumes: A+, B+, C+ (no labels, ignore for train_val)
+      volumes: ["A", "B", "C"]
   
   # 3D patch size for training [Z, Y, X]
   # Using [32, 128, 128] for compatibility with both datasets
@@ -236,8 +237,8 @@ callbacks:
     log_train: true        # Log training samples
     log_val: true          # Log validation samples
     log_embeddings: true   # Log instance embeddings as PCA projection to RGB
-    log_instances: true    # Log clustered instance segmentation
-    clustering_bandwidth: 0.5  # Bandwidth for mean-shift clustering
+    log_instances: true    # DISABLED - MeanShift clustering is too slow for training
+    clustering_bandwidth: 0.5  # Bandwidth for mean-shift clustering (not used when log_instances=false)
 
 # =============================================================================
 # Inference Configuration (for scripts/infer_vista3d.py)

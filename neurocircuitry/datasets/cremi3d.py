@@ -52,9 +52,14 @@ class CREMI3DDataset(BaseConnectomicsDataset):
     """
     
     # Class ID offsets for merging different annotation types
+    # Note: CREMI neuron IDs can be up to ~750000, so offsets must be larger
     NEURON_ID_OFFSET = 0
-    CLEFT_ID_OFFSET = 100000
-    MITO_ID_OFFSET = 200000
+    CLEFT_ID_OFFSET = 1000000   # 1M offset to avoid overlap with neuron IDs
+    MITO_ID_OFFSET = 2000000    # 2M offset
+    
+    # CREMI uses uint64 max as "no data" marker for clefts/mito
+    # Need to filter this out when loading labels
+    NO_DATA_MARKER = np.iinfo(np.uint64).max
     
     # Semantic class IDs
     CLASS_BACKGROUND = 0
@@ -244,22 +249,28 @@ class CREMI3DDataset(BaseConnectomicsDataset):
                     label[neuron_ids > 0] = neuron_ids[neuron_ids > 0] + self.NEURON_ID_OFFSET
                 
                 # Load cleft labels (optional)
+                # CREMI uses uint64 max as "no data" marker, filter it out
                 if self.include_clefts:
                     if "volumes/labels/clefts" in f:
                         cleft_ids = f["volumes/labels/clefts"][:]
-                        label[cleft_ids > 0] = cleft_ids[cleft_ids > 0] + self.CLEFT_ID_OFFSET
+                        valid_cleft_mask = (cleft_ids > 0) & (cleft_ids < self.NO_DATA_MARKER)
+                        label[valid_cleft_mask] = cleft_ids[valid_cleft_mask] + self.CLEFT_ID_OFFSET
                     elif "clefts" in f:
                         cleft_ids = f["clefts"][:]
-                        label[cleft_ids > 0] = cleft_ids[cleft_ids > 0] + self.CLEFT_ID_OFFSET
+                        valid_cleft_mask = (cleft_ids > 0) & (cleft_ids < self.NO_DATA_MARKER)
+                        label[valid_cleft_mask] = cleft_ids[valid_cleft_mask] + self.CLEFT_ID_OFFSET
                 
                 # Load mito labels (optional)
+                # CREMI uses uint64 max as "no data" marker, filter it out
                 if self.include_mito:
                     if "volumes/labels/mitochondria" in f:
                         mito_ids = f["volumes/labels/mitochondria"][:]
-                        label[mito_ids > 0] = mito_ids[mito_ids > 0] + self.MITO_ID_OFFSET
+                        valid_mito_mask = (mito_ids > 0) & (mito_ids < self.NO_DATA_MARKER)
+                        label[valid_mito_mask] = mito_ids[valid_mito_mask] + self.MITO_ID_OFFSET
                     elif "mitochondria" in f:
                         mito_ids = f["mitochondria"][:]
-                        label[mito_ids > 0] = mito_ids[mito_ids > 0] + self.MITO_ID_OFFSET
+                        valid_mito_mask = (mito_ids > 0) & (mito_ids < self.NO_DATA_MARKER)
+                        label[valid_mito_mask] = mito_ids[valid_mito_mask] + self.MITO_ID_OFFSET
                 
                 return image.astype(np.float32), label
                 
@@ -320,7 +331,7 @@ class CREMI3DDataset(BaseConnectomicsDataset):
                 label[neuron_ids > 0] = neuron_ids[neuron_ids > 0] + self.NEURON_ID_OFFSET
                 break
         
-        # Load cleft labels
+        # Load cleft labels (filter out uint64 max "no data" marker)
         if self.include_clefts:
             cleft_paths = [
                 self.root_dir / f"sample_{vol_name}_clefts.h5",
@@ -329,7 +340,8 @@ class CREMI3DDataset(BaseConnectomicsDataset):
             for path in cleft_paths:
                 if path.exists():
                     cleft_ids = load_h5(str(path))
-                    label[cleft_ids > 0] = cleft_ids[cleft_ids > 0] + self.CLEFT_ID_OFFSET
+                    valid_cleft_mask = (cleft_ids > 0) & (cleft_ids < self.NO_DATA_MARKER)
+                    label[valid_cleft_mask] = cleft_ids[valid_cleft_mask] + self.CLEFT_ID_OFFSET
                     break
         
         return image.astype(np.float32), label
